@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>份子钱记账本</title>
+<meta name="description" content="记录人情往来：谁、哪件事、收还是送、多少钱；按事、按人统计，不忘回礼。">
+<meta name="theme-color" content="#3b6fd6">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="份子钱">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand" onclick="location.hash='#/home'">📕 份子钱记账本</div>
+  <nav class="tabs" id="tabs">
+    <a href="#/home" data-tab="home">总览</a>
+    <a href="#/records" data-tab="records">记录</a>
+    <a href="#/events" data-tab="events">事由</a>
+    <a href="#/contacts" data-tab="contacts">人员</a>
+    <a href="#/stats" data-tab="stats">统计</a>
+    <a href="#/settings" data-tab="settings">设置</a>
+  </nav>
+  <div class="btn-row top-actions">
+    <button class="btn" id="voiceAdd" title="一句话一个人，批量录入">🎤 语音批量</button>
+    <button class="btn primary quick-add" id="quickAdd">＋ 记一笔</button>
+  </div>
+</header>
+
+<main id="view" class="container"></main>
+
+<div id="modalRoot"></div>
+<div id="toastRoot"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
