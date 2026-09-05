@@ -226,10 +226,10 @@
             <label class="${dir === 'in' ? 'in-sel' : ''}"><input type="radio" name="direction" value="in" ${dir === 'in' ? 'checked' : ''}>收：对方给我</label>
             <label class="${dir === 'out' ? 'out-sel' : ''}"><input type="radio" name="direction" value="out" ${dir === 'out' ? 'checked' : ''}>送：我给对方</label>
           </div></div>
-        <div class="field autocomplete"><label>对方姓名 *</label><input name="contactName" required autocomplete="off" value="${esc(c?.name || presets.contactName || '')}" placeholder="输入姓名，自动联想"><input type="hidden" name="contactId" value="${esc(c?.id || '')}"><div class="hint" id="cHint">${c ? esc([c.unit, c.dept, c.relation].filter(Boolean).join(' · ')) : '新姓名会自动创建联系人'}</div></div>
+        <div class="field autocomplete"><label>对方姓名 *</label><input name="contactName" required autocomplete="off" value="${esc(c?.name || presets.contactName || '')}" placeholder="输入姓名，自动联想；多人用逗号分开"><input type="hidden" name="contactId" value="${esc(c?.id || '')}"><div class="hint" id="cHint">${c ? esc([c.unit, c.dept, c.relation].filter(Boolean).join(' · ')) : '新姓名会自动创建联系人；多人用逗号分开，如：张三，李四，王五'}</div></div>
         <div class="field"><label>金额（元）*</label><input type="number" name="amount" required min="0" step="0.01" value="${esc(r.amount ?? presets.amount ?? '')}" placeholder="0"><div class="hint" id="refHint"></div></div>
-        <div class="field"><label>单位</label><input name="unit" value="${esc(c ? (c.unit || '') : (presets.unit || ''))}" placeholder="新建联系人时填写"></div>
-        <div class="field"><label>科室 / 部门</label><input name="dept" value="${esc(c ? (c.dept || '') : (presets.dept || ''))}"></div>
+        <div class="field"><label>单位</label><input name="unit" list="recUnitList" autocomplete="off" value="${esc(c ? (c.unit || '') : (presets.unit || ''))}" placeholder="可手输，点空白处或按 ↓ 选已有单位"><datalist id="recUnitList">${unitOptions()}</datalist></div>
+        <div class="field"><label>科室 / 部门</label><input name="dept" list="recDeptList" autocomplete="off" value="${esc(c ? (c.dept || '') : (presets.dept || ''))}" placeholder="可手输，或选该单位已有科室"><datalist id="recDeptList">${deptOptions(c ? c.unit : presets.unit)}</datalist></div>
         <div class="field full"><label>事由 *</label>
           <div style="display:flex;gap:8px"><select name="eventId" required style="flex:1">${options(evOptions, ev?.id, '请选择事由…')}</select><button type="button" class="btn" id="newEv">＋新事由</button></div></div>
         <div class="field"><label>日期 *</label><input type="date" name="date" required value="${esc(r.date || presets.date || ev?.date || today())}"></div>
@@ -244,6 +244,7 @@
       </div>`);
     const f = $('#f', m);
     setTimeout(() => $('[name=contactName]', m).focus(), 40);
+    $('[name=unit]', m).addEventListener('input', () => { $('#recDeptList', m).innerHTML = deptOptions($('[name=unit]', m).value.trim()); });
     // 方向切换样式
     $$('.seg input', m).forEach(inp => inp.onchange = () => {
       $$('.seg label', m).forEach(l => l.className = '');
@@ -277,9 +278,16 @@
       hint.textContent = txt;
     };
     bindContactAutocomplete($('[name=contactName]', m), $('[name=contactId]', m), cc => {
+      const names = splitNames($('[name=contactName]', m).value);
+      if (names.length > 1) {
+        // 多人模式：单位科室对所有新人生效，提示将生成几条记录
+        if (!r.id) { const newOnes = names.filter(n => !state.contacts.some(x => x.name === n)); $('#cHint', m).textContent = `将为 ${names.length} 人各记一笔${newOnes.length ? `，其中新建联系人：${newOnes.join('、')}` : ''}`; }
+        else $('#cHint', m).textContent = '编辑记录时只能填一个人';
+        $('#refHint', m).textContent = ''; return;
+      }
       // 选中已有联系人时带出其单位科室；输入新姓名时回落到本次批量录入沿用的单位科室
       $('[name=unit]', m).value = cc ? (cc.unit || '') : (presets.unit || ''); $('[name=dept]', m).value = cc ? (cc.dept || '') : (presets.dept || '');
-      $('#cHint', m).textContent = cc ? [cc.unit, cc.dept, cc.relation].filter(Boolean).join(' · ') || '已有联系人' : '新姓名会自动创建联系人';
+      $('#cHint', m).textContent = cc ? [cc.unit, cc.dept, cc.relation].filter(Boolean).join(' · ') || '已有联系人' : '新姓名会自动创建联系人；多人用逗号分开，如：张三，李四，王五';
       updateRef();
     });
     updateRef();
@@ -287,17 +295,32 @@
     const submit = (cont) => {
       if (!f.reportValidity()) return;
       const d = formData(f);
-      const cid = resolveContact(d.contactName, d.unit, d.dept, d.contactId);
-      const rec = { contactId: cid, eventId: d.eventId, direction: d.direction, amount: Number(d.amount), date: d.date, method: d.method, note: d.note };
-      if (r.id) Object.assign(state.records.find(x => x.id === r.id), rec);
-      else state.records.push({ id: uid(), createdAt: Date.now(), ...rec });
-      save(); toast('已保存'); render();
+      const names = splitNames(d.contactName);
+      if (!names.length) return toast('请填写姓名', true);
+      if (r.id && names.length > 1) return toast('编辑记录时只能填一个人', true);
+      const base = { eventId: d.eventId, direction: d.direction, amount: Number(d.amount), date: d.date, method: d.method, note: d.note };
+      if (r.id) Object.assign(state.records.find(x => x.id === r.id), { ...base, contactId: resolveContact(names[0], d.unit, d.dept, d.contactId) });
+      else {
+        const before = state.contacts.length;
+        names.forEach(n => state.records.push({ id: uid(), createdAt: Date.now(), ...base, contactId: resolveContact(n, d.unit, d.dept, names.length === 1 ? d.contactId : '', { quiet: names.length > 1 }) }));
+        const created = state.contacts.length - before;
+        if (names.length > 1) toast(`已为 ${names.length} 人各记一笔${created ? `，新建 ${created} 位联系人` : ''}`);
+      }
+      save(); if (names.length === 1) toast('已保存'); render();
       if (cont) recordForm({}, { eventId: d.eventId, direction: d.direction, amount: d.amount, date: d.date, method: d.method, note: d.note, unit: d.unit, dept: d.dept }); else closeModal();
     };
     $('[data-ok]', m).onclick = () => submit(false);
     f.onsubmit = e => { e.preventDefault(); submit(false); };
     if (!r.id) $('[data-more]', m).onclick = () => submit(true);
     if (r.id) $('[data-del]', m).onclick = () => deleteRecord(r.id);
+  }
+  /* 已有单位 / 科室的下拉选项（datalist）；科室按所填单位过滤，单位为空或无匹配时列出全部 */
+  const uniqSorted = arr => [...new Set(arr.filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh'));
+  const unitOptions = () => uniqSorted(state.contacts.map(c => c.unit)).map(u => `<option value="${esc(u)}">`).join('');
+  function deptOptions(unit) {
+    const inUnit = unit ? uniqSorted(state.contacts.filter(c => c.unit === unit).map(c => c.dept)) : [];
+    const list = inUnit.length ? inUnit : uniqSorted(state.contacts.map(c => c.dept));
+    return list.map(d => `<option value="${esc(d)}">`).join('');
   }
   /* 按姓名 + 单位 + 科室找到已有联系人，找不到则新建；返回 contactId */
   function resolveContact(name, unit = '', dept = '', knownId = '', opts = {}) {
@@ -318,14 +341,25 @@
     confirmDialog('删除这条记录？', () => { state.records = state.records.filter(x => x.id !== id); save(); closeModal(); toast('已删除'); render(); });
   }
 
+  /* 多人姓名分隔：中英文逗号、顿号、分号、斜杠、空格 */
+  const NAME_SEP_RE = /[，,、;；/／\s]+/;
+  const splitNames = s => [...new Set(String(s || '').split(NAME_SEP_RE).map(x => x.trim()).filter(Boolean))];
+
   /* 姓名联想 */
   function bindContactAutocomplete(input, hidden, onPick) {
     let list = null, idx = -1, items = [];
     const close = () => { list && list.remove(); list = null; idx = -1; };
-    const pick = c => { input.value = c.name; hidden.value = c.id; close(); onPick && onPick(c); };
+    // 多人模式（含逗号）时只对最后一段联想，选中后替换最后一段
+    const lastSeg = () => { const parts = input.value.split(NAME_SEP_RE); return parts[parts.length - 1].trim(); };
+    const pick = c => {
+      const parts = input.value.split(NAME_SEP_RE);
+      if (parts.length > 1) { parts[parts.length - 1] = c.name; input.value = parts.map(x => x.trim()).filter(Boolean).join('，'); hidden.value = ''; }
+      else { input.value = c.name; hidden.value = c.id; }
+      close(); onPick && onPick(parts.length > 1 ? null : c);
+    };
     input.addEventListener('input', () => {
       hidden.value = ''; onPick && onPick(null);
-      const q = input.value.trim().toLowerCase();
+      const q = lastSeg().toLowerCase();
       close();
       if (!q) return;
       items = state.contacts.filter(c => (c.name + (c.unit || '') + (c.dept || '')).toLowerCase().includes(q)).slice(0, 8);
@@ -346,7 +380,7 @@
     });
     input.addEventListener('blur', () => setTimeout(() => {
       // 失焦时如果输入恰好等于唯一联系人姓名，自动匹配
-      if (!hidden.value) { const ex = state.contacts.filter(c => c.name === input.value.trim()); if (ex.length === 1) { hidden.value = ex[0].id; onPick && onPick(ex[0]); } }
+      if (!hidden.value && !NAME_SEP_RE.test(input.value)) { const ex = state.contacts.filter(c => c.name === input.value.trim()); if (ex.length === 1) { hidden.value = ex[0].id; onPick && onPick(ex[0]); } }
       close();
     }, 150));
   }

@@ -21,7 +21,9 @@
 4. **弹窗/提示**：`openModal(html)` 返回 mask，`closeModal() toast(msg,isError) confirmDialog()`；表单用 `formData(form)` 取值
 5. **表单**：`contactForm eventForm recordForm(r, presets)`；`resolveContact(name,unit,dept,knownId,{quiet})` 找到或新建联系人（记一笔和语音批量共用）
    - `recordForm` 的 `presets` 支持 `eventId direction amount date method note unit dept contactName`；「保存并继续」把除姓名外全部字段作为 presets 再开一次
-   - `bindContactAutocomplete(input, hiddenIdInput, onPick)` 姓名联想，onPick(null) 表示输入了新名字
+   - `bindContactAutocomplete(input, hiddenIdInput, onPick)` 姓名联想，onPick(null) 表示输入了新名字；含分隔符时只对最后一段联想
+   - 多人：`NAME_SEP_RE`/`splitNames()`，submit 时按人循环 `resolveContact`；编辑模式拒绝多人
+   - 单位/科室 `<datalist>`：`unitOptions()` `deptOptions(unit)`，单位 input 事件时刷新科室列表
 6. **语音/文字批量录入**：`cnToNumber` `extractAmount` `parseClause(raw, defaults)` `parseBatchText` `voiceBatchForm(presets)`
    - 解析顺序：方向词 → 支付方式词 → 已有联系人名（长名优先）→ 金额 → 括号备注 → 去填充词 → 分词归位（单位/科室后缀 `DEPT_SUFFIX`，>6 字进备注）
    - 中文金额必须带 百/千/万 或 元/块/钱 后缀，避免把「张三」「王五」里的数字当金额；「王五五百」把多余前导数字还给姓名
