@@ -2,6 +2,11 @@
 (function (root) {
   'use strict';
   const object = x => x && typeof x === 'object' && !Array.isArray(x);
+  function canonical(x) {
+    if (Array.isArray(x)) return '[' + x.map(canonical).join(',') + ']';
+    if (object(x)) return '{' + Object.keys(x).sort().map(k => JSON.stringify(k) + ':' + canonical(x[k])).join(',') + '}';
+    return x === undefined ? 'null' : JSON.stringify(x);
+  }
   function normalize(data, defaults = {}) {
     if (!object(data)) throw new Error('备份必须是 JSON 对象');
     const result = { ...data, contacts: data.contacts ?? [], events: data.events ?? [], records: data.records ?? [], settings: { ...defaults, ...(object(data.settings) ? data.settings : {}) }, meta: object(data.meta) ? { ...data.meta } : {} };
@@ -20,7 +25,6 @@
     return result;
   }
   function mergePreview(current, incoming) {
-    const canonical = x => JSON.stringify(x, Object.keys(x).sort());
     const counts = {};
     const result = { ...incoming, ...current, settings: { ...incoming.settings, ...current.settings }, meta: { ...incoming.meta, ...current.meta } };
     for (const key of ['contacts', 'events', 'records']) {
@@ -78,8 +82,12 @@
     records.forEach(r => { const key = keyFn(r); if (!groups.has(key)) groups.set(key, []); groups.get(key).push(r); });
     return [...groups].map(([key, rs]) => ({ key, records: rs, ...summarize(rs) })).sort((a, b) => b.gross - a.gross || String(a.key).localeCompare(String(b.key), 'zh'));
   }
-  function audit(data, today) {
-    const contacts = new Set(data.contacts.map(c => c.id)), events = new Set(data.events.map(e => e.id));
+  function auditSignature(record, reasons) {
+    const clean = Object.fromEntries(Object.entries(record).filter(([key]) => key !== 'auditReview'));
+    return canonical({ record: clean, reasons: [...reasons].sort() });
+  }
+  function audit(data, today, options = {}) {
+    const contacts = new Set(data.contacts.map(c => String(c.id))), events = new Set(data.events.map(e => String(e.id)));
     const duplicates = new Map();
     data.records.forEach(r => { const key = JSON.stringify([r.contactId, r.eventId, r.date, r.direction, cents(r.amount), r.method || '']); if (!duplicates.has(key)) duplicates.set(key, []); duplicates.get(key).push(r.id); });
     const duplicateIds = new Set([...duplicates.values()].filter(ids => ids.length > 1).flat());
@@ -89,11 +97,15 @@
       if (!validDate(r.date)) reasons.push('日期无效');
       if (cents(r.amount) === null) reasons.push('金额无效');
       if (!['in', 'out'].includes(r.direction)) reasons.push('方向无效');
-      if (!contacts.has(r.contactId)) reasons.push('联系人未关联');
-      if (!events.has(r.eventId)) reasons.push('事由未关联');
+      if (!contacts.has(String(r.contactId))) reasons.push('联系人未关联');
+      if (!events.has(String(r.eventId))) reasons.push('事由未关联');
       if (validDate(r.date) && r.date > today) reasons.push('未来日期');
       if (duplicateIds.has(r.id)) reasons.push('疑似重复');
-      if (reasons.length) issues.push({ record: r, reasons });
+      if (reasons.length) {
+        const signature = auditSignature(r, reasons);
+        const confirmed = object(r.auditReview) && r.auditReview.signature === signature;
+        if (options.includeConfirmed || !confirmed) issues.push({ record: r, reasons, signature, confirmed, confirmedAt: confirmed ? r.auditReview.confirmedAt : null });
+      }
     });
     return issues;
   }
@@ -133,6 +145,6 @@
     const structures = Object.fromEntries(Object.entries(dimensions).map(([key, fn]) => [key, group(records, fn)]));
     return { period, records, previous, totals, prevTotals: summarize(previous), opening, closing, byPerson, balances, positive, negative, median, trend, monthly, structures, contacts, events, issues: audit(data, today), excluded: data.records.filter(r => !validRecord(r)).length, future: valid.filter(r => r.date > today).length };
   }
-  root.FZAnalytics = { normalize, mergePreview, validDate, cents, validRecord, summarize, periodFor, group, audit, build };
+  root.FZAnalytics = { normalize, mergePreview, validDate, cents, validRecord, summarize, periodFor, group, auditSignature, audit, build };
   if (typeof module !== 'undefined') module.exports = root.FZAnalytics;
 })(typeof window !== 'undefined' ? window : globalThis);

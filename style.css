@@ -294,6 +294,8 @@ td.wrap { white-space: normal; max-width: 260px; }
 .pager { display:flex; justify-content:flex-end; align-items:center; flex-wrap:wrap; gap:10px; padding-top:16px; font-size:13px; color:var(--muted); }
 .pager span { margin-right:auto; }
 .audit-reason { font-size:12px; color:#966020; min-width:130px; }
+.audit-actions { display:flex; align-items:center; gap:4px; margin-top:5px; }
+.audit-actions .btn { min-height:0; }
 .event-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; }
 .event-card { margin:0; display:flex; flex-direction:column; border:1px solid var(--border); box-shadow:none; }
 .event-card h2 a { color:var(--text); }

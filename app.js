@@ -642,6 +642,13 @@
       if (act === 'backup') return exportJson();
       if (act === 'record-preset' || act === 'home-records') { setRecordPreset(el.dataset.preset); if (el.dataset.dir) recFilter.dir = el.dataset.dir; if (route().page === 'records') render(); else location.hash = '#/records'; return; }
       if (act === 'record-page') { recordPage = Math.max(1, Number(el.dataset.page)); render(); return; }
+      if (act === 'confirm-record-issue') { confirmAuditRecords(state.records.filter(r => String(r.id) === String(id))); return; }
+      if (act === 'confirm-filtered-issues') { confirmAuditRecords(filteredRecords()); return; }
+      if (act === 'reopen-record-issue') {
+        const record = state.records.find(r => String(r.id) === String(id));
+        if (!record?.auditReview) return;
+        delete record.auditReview; save(); render(); toast('已撤销确认，这条记录会重新提示核对'); return;
+      }
       if (act === 'person-records') return goRecords({ contactId: id });
       if (act === 'contact-scope') { contactView.balance = el.dataset.scope; contactView.q = ''; if (route().page === 'contacts') render(); else location.hash = '#/contacts'; return; }
       if (act === 'event-scope') { eventView.scope = el.dataset.scope; eventView.q = ''; eventView.mine = ''; if (route().page === 'events') render(); else location.hash = '#/events'; return; }
@@ -668,6 +675,19 @@
     });
   }
 
+  function confirmAuditRecords(records) {
+    const all = new Map(FZAnalytics.audit(state, today(), { includeConfirmed: true }).map(x => [String(x.record.id), x]));
+    const pending = records.map(r => all.get(String(r.id))).filter(x => x && !x.confirmed);
+    if (!pending.length) return toast('当前范围没有待确认提示');
+    const one = pending.length === 1 ? pending[0] : null;
+    const subject = one ? `${displayName(contactById(one.record.contactId))} · ${eventLabel(eventById(one.record.eventId))} · ${one.reasons.join('、')}` : `当前筛选结果中的 ${pending.length} 条提示`;
+    confirmDialog(`确认「${esc(subject)}」已核实，记录内容无需修改？<br><span class="c-muted">确认后不再计入待确认；记录内容或关联关系变化时会自动重新提示。</span>`, () => {
+      const confirmedAt = Date.now();
+      pending.forEach(x => { x.record.auditReview = { signature: x.signature, reasons: [...x.reasons], confirmedAt }; });
+      save(); render(); toast(`已确认 ${pending.length} 条核对提示`);
+    }, pending.length === 1 ? '确认无误' : `确认 ${pending.length} 条`, false);
+  }
+
   /* ========== 记录表格（复用） ========== */
   function recordsTable(recs, opts = {}) {
     if (!recs.length) return `<div class="empty">暂无记录</div>`;
@@ -687,7 +707,7 @@
           ${cols.amount ? `<td class="num ${r.direction === 'in' ? 'c-in' : 'c-out'}"><b>${r.direction === 'in' ? '+' : '-'}${money(r.amount)}</b></td>` : ''}
           ${cols.method ? `<td class="c-muted">${esc(r.method || '')}</td>` : ''}
           ${cols.note ? `<td class="wrap c-muted">${esc(r.note || '')}</td>` : ''}
-          ${opts.issues ? `<td class="wrap audit-reason">${esc((opts.issues.get(r.id) || []).join(' / ')) || '—'}</td>` : ''}
+          ${opts.issues ? (() => { const issue = opts.issues.get(String(r.id)); return `<td class="wrap audit-reason">${issue ? `<div>${esc(issue.reasons.join(' / '))}</div><div class="audit-actions">${issue.confirmed ? `<span class="status-tag green">已确认</span><button class="btn link sm" data-act="reopen-record-issue" data-id="${esc(r.id)}">重新核对</button>` : `<span class="status-tag amber">待确认</span><button class="btn link sm" data-act="confirm-record-issue" data-id="${esc(r.id)}">确认无误</button>`}</div>` : '—'}</td>`; })() : ''}
           ${cols.ops ? `<td class="no-print"><button class="btn link sm" data-act="edit-record" data-id="${r.id}">编辑</button></td>` : ''}
         </tr>`;
       }).join('')}</tbody></table></div>`;
@@ -732,6 +752,7 @@
     if (preset === 'month') { recFilter.from = today().slice(0, 7) + '-01'; recFilter.to = today(); }
     if (preset === 'year') { recFilter.from = today().slice(0, 4) + '-01-01'; recFilter.to = today(); }
     if (preset === 'issues') recFilter.issue = 'all';
+    if (preset === 'confirmed') recFilter.issue = 'confirmed';
     recordPage = 1;
   }
   function goRecords(values = {}) {
@@ -768,10 +789,12 @@
   let recordPage = 1;
   function filteredRecords() {
     const q = recFilter.q.toLowerCase();
-    const issueMap = new Map(FZAnalytics.audit(state, today()).map(x => [x.record.id, x.reasons]));
+    const issueMap = new Map(FZAnalytics.audit(state, today(), { includeConfirmed: true }).map(x => [String(x.record.id), x]));
     let recs = state.records.filter(r => {
       const c = contactById(r.contactId), ev = eventById(r.eventId);
-      if (recFilter.issue && (!issueMap.has(r.id) || (recFilter.issue !== 'all' && !issueMap.get(r.id).includes(recFilter.issue)))) return false;
+      const issue = issueMap.get(String(r.id));
+      if (recFilter.issue === 'confirmed' && !issue?.confirmed) return false;
+      if (recFilter.issue && recFilter.issue !== 'confirmed' && (!issue || issue.confirmed || (recFilter.issue !== 'all' && !issue.reasons.includes(recFilter.issue)))) return false;
       if (recFilter.contactId && String(r.contactId) !== String(recFilter.contactId)) return false;
       if (recFilter.dir && r.direction !== recFilter.dir) return false;
       if (recFilter.eventId && String(r.eventId) !== String(recFilter.eventId)) return false;
@@ -792,22 +815,25 @@
     const recs = filteredRecords();
     const t = FZAnalytics.summarize(recs);
     const pages = Math.max(1, Math.ceil(recs.length / 50)); recordPage = Math.min(recordPage, pages);
-    const issues = new Map(FZAnalytics.audit(state, today()).map(x => [x.record.id, x.reasons]));
+    const auditItems = FZAnalytics.audit(state, today(), { includeConfirmed: true });
+    const issues = new Map(auditItems.map(x => [String(x.record.id), x]));
     const units = [...new Set(state.contacts.map(c => c.unit).filter(Boolean))].sort();
-    const issueCount = FZAnalytics.audit(state, today()).length;
+    const issueCount = auditItems.filter(x => !x.confirmed).length;
+    const confirmedCount = auditItems.filter(x => x.confirmed).length;
+    const pendingInResult = recs.filter(r => { const issue = issues.get(String(r.id)); return issue && !issue.confirmed; }).length;
     return `
       ${moduleHead('每一笔，都找得到', '按人、按事、按日期查账；筛选结果可完整导出。', '<button class="btn" data-act="voice-add">批量录入</button><button class="btn primary" data-act="add-record">＋ 记一笔</button>')}
-      <div class="filter-shortcuts no-print">${[['all','全部流水'],['month','本月'],['year','本年'],['issues','待核对 ' + issueCount]].map(([key,label]) => `<button class="btn sm" data-act="record-preset" data-preset="${key}">${label}</button>`).join('')}</div>
+      <div class="filter-shortcuts no-print">${[['all','全部流水'],['month','本月'],['year','本年'],['issues','待核对 ' + issueCount],...(confirmedCount ? [['confirmed','已确认 ' + confirmedCount]] : [])].map(([key,label]) => `<button class="btn sm" data-act="record-preset" data-preset="${key}">${label}</button>`).join('')}</div>
       <div class="card">
         <div class="card-head"><h2>全部记录 <span class="c-muted" style="font-size:13px;font-weight:400">共 ${recs.length} 条 · 收 <span class="c-in">${money(t.inAmt)}</span> · 送 <span class="c-out">${money(t.outAmt)}</span></span></h2>
-          <div class="btn-row"><button class="btn sm" id="exportFiltered">导出当前结果 CSV</button><button class="btn sm" data-act="voice-add">🎤 语音批量</button><button class="btn primary sm" data-act="add-record">＋ 记一笔</button></div></div>
+          <div class="btn-row"><button class="btn sm" id="exportFiltered">导出当前结果 CSV</button>${pendingInResult ? `<button class="btn sm" data-act="confirm-filtered-issues">批量确认 ${pendingInResult} 条</button>` : ''}<button class="btn sm" data-act="voice-add">🎤 语音批量</button><button class="btn primary sm" data-act="add-record">＋ 记一笔</button></div></div>
         <div class="filters no-print" id="filters">
           <div class="field" style="flex:1;min-width:160px"><label>搜索</label><input name="q" value="${esc(recFilter.q)}" placeholder="姓名 / 单位 / 事由 / 备注"></div>
           <div class="field"><label>方向</label><select name="dir">${options([{ value: '', label: '全部' }, { value: 'in', label: '收' }, { value: 'out', label: '送' }], recFilter.dir)}</select></div>
           <div class="field" style="min-width:180px"><label>事由</label><select name="eventId">${options(state.events.slice().sort(byDateDesc).map(e => ({ value: e.id, label: e.title })), recFilter.eventId, '全部')}</select></div>
           <div class="field"><label>单位</label><select name="unit">${options(units, recFilter.unit, '全部')}</select></div>
           <div class="field"><label>联系人</label><select name="contactId">${options(state.contacts.map(c => ({value:c.id,label:displayName(c)})), recFilter.contactId, '全部')}</select></div>
-          <div class="field"><label>核对范围</label><select name="issue">${options([{value:'',label:'全部记录'},{value:'all',label:'所有待核对'},...['日期无效','金额无效','方向无效','联系人未关联','事由未关联','未来日期','疑似重复'].map(x => ({value:x,label:x}))], recFilter.issue)}</select></div>
+          <div class="field"><label>核对范围</label><select name="issue">${options([{value:'',label:'全部记录'},{value:'all',label:'待确认提示 ' + issueCount},{value:'confirmed',label:'已确认提示 ' + confirmedCount},...['日期无效','金额无效','方向无效','联系人未关联','事由未关联','未来日期','疑似重复'].map(x => ({value:x,label:'待确认 · ' + x}))], recFilter.issue)}</select></div>
           <div class="field"><label>从</label><input type="date" name="from" value="${recFilter.from}"></div>
           <div class="field"><label>到</label><input type="date" name="to" value="${recFilter.to}"></div>
           <div class="field" style="min-width:90px"><label>金额≥</label><input type="number" name="min" value="${recFilter.min}"></div>
@@ -966,10 +992,11 @@
     const persons = a.byPerson.map(r => ({ ...r, label: labelFor(r, 'person'), link: a.contacts.get(r.key) ? '#/contacts/' + encodeURIComponent(r.key) : null, last: r.records.map(x => x.date).sort().slice(-1)[0] || '', gross: r.gross }));
     const previousText = a.period.comparison ? ` · 对比上期 ${statMoney(a.prevTotals.gross)}（${a.prevTotals.gross ? ((a.totals.gross / a.prevTotals.gross - 1) * 100).toFixed(1) + '%' : '—'}）` : '';
     const periodText = `${a.period.label}：${a.period.from} 至 ${a.period.to}${previousText}`;
-    const openingNet = a.opening.net, closingNet = a.closing.net, issueCount = a.issues.length;
+    const auditItems = FZAnalytics.audit(state, todayDate, { includeConfirmed: true });
+    const openingNet = a.opening.net, closingNet = a.closing.net, issueCount = auditItems.filter(x => !x.confirmed).length, confirmedCount = auditItems.filter(x => x.confirmed).length;
     const concentration = persons.length ? persons.slice(0, 3).reduce((s, r) => s + r.gross, 0) / Math.max(1, a.totals.gross) * 100 : 0;
     const modes = [{ value: 'all', label: '全部历史' }, { value: 'ytd', label: '本年截至今天' }, { value: 'last12', label: '近 12 个月' }, ...years.map(y => ({ value: `year:${y}`, label: `${y} 年` }))];
-    const audit = issueCount ? `<a href="#/records">有 ${issueCount} 条记录需要核对 →</a>` : '记录字段完整，未发现明显异常';
+    const audit = issueCount ? `<button class="btn link sm" data-act="home-records" data-preset="issues">有 ${issueCount} 条记录需要核对 →</button>` : confirmedCount ? `${confirmedCount} 条提示已经人工确认` : '记录字段完整，未发现核对提示';
     return `
       <div class="stats-head"><div><div class="eyebrow">经营视角 · 人情往来</div><h1>统计分析</h1><p class="c-muted">${esc(periodText)} · 收送差额 = 收 − 送</p></div><label class="stats-period">分析期间<select id="statsPeriod">${options(modes, mode)}</select></label></div>
       <div class="stats-kpis"><div class="stat"><div class="label">本期往来总额</div><div class="value">${statMoney(a.totals.gross)}</div><div class="sub">收 ${statMoney(a.totals.inAmt)} · 送 ${statMoney(a.totals.outAmt)}</div></div><div class="stat"><div class="label">本期收送差额</div><div class="value ${a.totals.net >= 0 ? 'c-in' : 'c-out'}">${a.totals.net >= 0 ? '+' : '−'}${statMoney(Math.abs(a.totals.net))}</div><div class="sub">期内结果</div></div><div class="stat"><div class="label">截至期末人情差额</div><div class="value ${closingNet >= 0 ? 'c-in' : 'c-out'}">${closingNet >= 0 ? '+' : '−'}${statMoney(Math.abs(closingNet))}</div><div class="sub">累计收 − 累计送</div></div><div class="stat"><div class="label">活跃对象</div><div class="value">${new Set(a.records.map(r => r.contactId)).size}</div><div class="sub">涉及 ${new Set(a.records.map(r => r.eventId)).size} 个事由</div></div><div class="stat"><div class="label">笔均 / 中位数</div><div class="value">${statMoney(a.totals.count ? a.totals.gross / a.totals.count : 0)}</div><div class="sub">中位数 ${statMoney(a.median)}</div></div></div>
@@ -977,17 +1004,17 @@
       <div class="stats-layout"><section class="card stats-wide"><div class="card-head"><div><h2>收送趋势</h2><p class="chart-caption">按月展示；跨度超过 24 个月时自动按年汇总</p></div><div class="legend"><span><i style="background:var(--in)"></i>收</span><span><i style="background:var(--out)"></i>送</span></div></div>${statTrend(a.trend)}</section><section class="card"><h2>收送结构</h2><p class="chart-caption">按业务维度拆分，优先关注差额和总额</p>${statRows(rowsFor('type'), 8)}</section></div>
       <div class="stats-layout"><section class="card"><h2>往来对象</h2><p class="chart-caption">按本期金额排序；累计差额见联系人详情</p>${statTable(persons)}</section><section class="card"><h2>单位 / 科室</h2><p class="chart-caption">用于识别集中往来来源</p><div class="stats-subhead">单位</div>${statRows(rowsFor('unit'), 8)}<div class="stats-subhead">科室</div>${statRows(rowsFor('dept'), 8)}</section></div>
       <div class="stats-layout"><section class="card"><h2>关系 / 支付方式</h2><div class="stats-subhead">关系</div>${statRows(rowsFor('relation'), 8)}<div class="stats-subhead">支付方式</div>${statRows(rowsFor('method'), 8)}</section><section class="card"><h2>人情余额</h2><p class="chart-caption">截至期末累计净额，正数表示收得更多，负数表示对方尚未回礼</p><div class="balance-list">${balanceTable(a.positive, '我欠人情')}${balanceTable(a.negative, '对方欠我')}</div></section></div>
-      <div class="card stats-audit"><div class="card-head"><div><h2>数据核对</h2><p class="chart-caption">统计只纳入日期、方向、金额有效且不晚于今天的记录，原始记录不会被删除。</p></div><b class="${issueCount ? 'c-warn' : 'c-in'}">${issueCount ? issueCount + ' 条需检查' : '未发现问题'}</b></div>${issueCount ? `<div class="audit-list">${a.issues.slice(0, 8).map(x => `<div class="audit-item"><span>${esc(x.record.date || '无日期')} · ${esc(x.record.note || x.record.id)}</span><b>${esc(x.reasons.join('、'))}</b></div>`).join('')}${issueCount > 8 ? `<div class="c-muted">还有 ${issueCount - 8} 条，请到记录页筛选核对。</div>` : ''}</div>` : '<div class="empty">金额、日期、方向和关联关系均可用于统计。</div>'}</div>`;
+      <div class="card stats-audit"><div class="card-head"><div><h2>数据核对</h2><p class="chart-caption">统计只纳入日期、方向、金额有效且不晚于今天的记录。人工确认会关闭提示，但不会把无效字段强行计入统计。</p></div><div class="btn-row"><b class="${issueCount ? 'c-warn' : 'c-in'}">${issueCount ? issueCount + ' 条待确认' : '没有待确认项'}</b>${confirmedCount ? `<button class="btn sm" data-act="record-preset" data-preset="confirmed">查看已确认 ${confirmedCount} 条</button>` : ''}</div></div>${issueCount ? `<div class="audit-list">${a.issues.slice(0, 8).map(x => `<div class="audit-item"><span>${esc(x.record.date || '无日期')} · ${esc(x.record.note || x.record.id)}</span><b>${esc(x.reasons.join('、'))}</b></div>`).join('')}${issueCount > 8 ? `<div class="c-muted">还有 ${issueCount - 8} 条，请到记录页筛选核对。</div>` : ''}</div>` : `<div class="empty">${confirmedCount ? '所有核对提示均已人工确认，可随时查看或重新核对。' : '金额、日期、方向和关联关系均可用于统计。'}</div>`}</div>`;
   }
 
 
   /* ========== 页面：设置 ========== */
   function pageSettings() {
     const s = state.settings;
-    const check = FZAnalytics.audit(state, today()), recovery = getRecovery();
+    const auditItems = FZAnalytics.audit(state, today(), { includeConfirmed: true }), check = auditItems.filter(x => !x.confirmed), confirmed = auditItems.filter(x => x.confirmed), recovery = getRecovery();
     return `
       ${moduleHead('账本在自己手里', '查看数据状况、下载备份、预览导入；原有 JSON 可继续使用。')}
-      <section class="card safety-panel"><div><span class="section-kicker">数据与恢复</span><h2>${state.records.length} 笔往来，${state.contacts.length} 位亲友</h2><p>仅保存在当前浏览器；手机和电脑需通过 JSON 备份迁移，尚未自动同步。</p></div><div class="btn-row"><button class="btn" data-act="home-records" data-preset="issues">核对 ${check.length} 笔提示</button>${recovery ? '<button class="btn" id="restoreRecovery">恢复导入前的账本</button>' : ''}</div>${recovery ? `<p class="section-note">保留最近一次导入前的本机恢复点：${new Date(recovery.savedAt).toLocaleString('zh-CN')}。恢复会先保存当前版本，可再次切换。</p>` : '<p class="section-note">每次合并或覆盖导入前，自动保留一个本机恢复点。恢复点与本站数据一起清理，不能代替下载备份。</p>'}</section>
+      <section class="card safety-panel"><div><span class="section-kicker">数据与恢复</span><h2>${state.records.length} 笔往来，${state.contacts.length} 位亲友</h2><p>仅保存在当前浏览器；手机和电脑需通过 JSON 备份迁移，尚未自动同步。</p></div><div class="btn-row"><button class="btn" data-act="home-records" data-preset="issues">待确认 ${check.length} 笔</button>${confirmed.length ? `<button class="btn" data-act="home-records" data-preset="confirmed">已确认 ${confirmed.length} 笔</button>` : ''}${recovery ? '<button class="btn" id="restoreRecovery">恢复导入前的账本</button>' : ''}</div>${recovery ? `<p class="section-note">保留最近一次导入前的本机恢复点：${new Date(recovery.savedAt).toLocaleString('zh-CN')}。恢复会先保存当前版本，可再次切换。</p>` : '<p class="section-note">每次合并或覆盖导入前，自动保留一个本机恢复点。恢复点与本站数据一起清理，不能代替下载备份。</p>'}</section>
       ${installCard()}
       <div class="grid grid-2">
         <div class="card"><h2>数据备份</h2>
@@ -1011,7 +1038,7 @@
         </div>
         <div class="card"><h2>其他</h2>
           <div class="btn-row"><button class="btn" id="loadDemo">载入示例数据</button><button class="btn danger" id="clearAll">清空全部数据</button></div>
-          <p class="c-muted" style="font-size:13px;margin-top:12px">示例数据用于体验，会与现有数据合并。<br>版本 1.3 · 本地账本 · 支持离线</p>
+          <p class="c-muted" style="font-size:13px;margin-top:12px">示例数据用于体验，会与现有数据合并。<br>版本 1.3.1 · 本地账本 · 支持离线</p>
         </div>
       </div>`;
   }
