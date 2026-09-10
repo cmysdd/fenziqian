@@ -214,10 +214,6 @@ td.wrap { white-space: normal; max-width: 260px; }
 .stats-subhead { color: var(--muted); font-size: 12px; font-weight: 700; margin: 14px 0 8px; padding-top: 10px; border-top: 1px solid var(--border); }
 .stats-subhead:first-of-type { margin-top: 0; padding-top: 0; border-top: 0; }
 .balance-list h3 { color: var(--muted); font-size: 13px; margin: 14px 0 8px; }
-.stats-audit { margin-bottom: 16px; }
-.audit-list { display: flex; flex-direction: column; gap: 7px; }
-.audit-item { display: flex; justify-content: space-between; gap: 12px; padding: 8px 10px; background: var(--bg); border-radius: 6px; font-size: 13px; }
-.audit-item b { color: var(--warn); font-weight: 600; }
 
 /* 列表 */
 .list-item { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border); gap: 10px; }
@@ -293,9 +289,6 @@ td.wrap { white-space: normal; max-width: 260px; }
 .result-summary span { margin-left:auto; font-size:12px; }
 .pager { display:flex; justify-content:flex-end; align-items:center; flex-wrap:wrap; gap:10px; padding-top:16px; font-size:13px; color:var(--muted); }
 .pager span { margin-right:auto; }
-.audit-reason { font-size:12px; color:#966020; min-width:130px; }
-.audit-actions { display:flex; align-items:center; gap:4px; margin-top:5px; }
-.audit-actions .btn { min-height:0; }
 .event-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; }
 .event-card { margin:0; display:flex; flex-direction:column; border:1px solid var(--border); box-shadow:none; }
 .event-card h2 a { color:var(--text); }
@@ -374,7 +367,6 @@ td.wrap { white-space: normal; max-width: 260px; }
   .stats-layout .card { padding: 14px; }
   .stats-insights { gap: 7px 12px; }
   .stats-kpis .stat .value { font-size: 19px; }
-  .audit-item { align-items: flex-start; flex-direction: column; gap: 2px; }
   .rank-row { grid-template-columns: 82px minmax(0, 1fr); gap: 8px; }
   .rank-meta { gap: 4px; font-size: 11px; }
   .rank-meta em { display: none; }

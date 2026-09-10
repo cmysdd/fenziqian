@@ -82,33 +82,6 @@
     records.forEach(r => { const key = keyFn(r); if (!groups.has(key)) groups.set(key, []); groups.get(key).push(r); });
     return [...groups].map(([key, rs]) => ({ key, records: rs, ...summarize(rs) })).sort((a, b) => b.gross - a.gross || String(a.key).localeCompare(String(b.key), 'zh'));
   }
-  function auditSignature(record, reasons) {
-    const clean = Object.fromEntries(Object.entries(record).filter(([key]) => key !== 'auditReview'));
-    return canonical({ record: clean, reasons: [...reasons].sort() });
-  }
-  function audit(data, today, options = {}) {
-    const contacts = new Set(data.contacts.map(c => String(c.id))), events = new Set(data.events.map(e => String(e.id)));
-    const duplicates = new Map();
-    data.records.forEach(r => { const key = JSON.stringify([r.contactId, r.eventId, r.date, r.direction, cents(r.amount), r.method || '']); if (!duplicates.has(key)) duplicates.set(key, []); duplicates.get(key).push(r.id); });
-    const duplicateIds = new Set([...duplicates.values()].filter(ids => ids.length > 1).flat());
-    const issues = [];
-    data.records.forEach(r => {
-      const reasons = [];
-      if (!validDate(r.date)) reasons.push('日期无效');
-      if (cents(r.amount) === null) reasons.push('金额无效');
-      if (!['in', 'out'].includes(r.direction)) reasons.push('方向无效');
-      if (!contacts.has(String(r.contactId))) reasons.push('联系人未关联');
-      if (!events.has(String(r.eventId))) reasons.push('事由未关联');
-      if (validDate(r.date) && r.date > today) reasons.push('未来日期');
-      if (duplicateIds.has(r.id)) reasons.push('疑似重复');
-      if (reasons.length) {
-        const signature = auditSignature(r, reasons);
-        const confirmed = object(r.auditReview) && r.auditReview.signature === signature;
-        if (options.includeConfirmed || !confirmed) issues.push({ record: r, reasons, signature, confirmed, confirmedAt: confirmed ? r.auditReview.confirmedAt : null });
-      }
-    });
-    return issues;
-  }
   function build(data, filter, today) {
     const period = periodFor(filter, data.records, today);
     const valid = data.records.filter(validRecord);
@@ -143,8 +116,8 @@
       event: r => r.eventId || ''
     };
     const structures = Object.fromEntries(Object.entries(dimensions).map(([key, fn]) => [key, group(records, fn)]));
-    return { period, records, previous, totals, prevTotals: summarize(previous), opening, closing, byPerson, balances, positive, negative, median, trend, monthly, structures, contacts, events, issues: audit(data, today), excluded: data.records.filter(r => !validRecord(r)).length, future: valid.filter(r => r.date > today).length };
+    return { period, records, previous, totals, prevTotals: summarize(previous), opening, closing, byPerson, balances, positive, negative, median, trend, monthly, structures, contacts, events };
   }
-  root.FZAnalytics = { normalize, mergePreview, validDate, cents, validRecord, summarize, periodFor, group, auditSignature, audit, build };
+  root.FZAnalytics = { normalize, mergePreview, validDate, cents, validRecord, summarize, periodFor, group, build };
   if (typeof module !== 'undefined') module.exports = root.FZAnalytics;
 })(typeof window !== 'undefined' ? window : globalThis);

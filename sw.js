@@ -1,5 +1,5 @@
 // Service Worker：离线缓存。每次修改 html/css/js 后请把 CACHE_VERSION 加 1，否则已安装的用户拿不到更新。
-const CACHE_VERSION = 'v7';
+const CACHE_VERSION = 'v8';
 const CACHE_NAME = 'fenziqian-' + CACHE_VERSION;
 const ASSETS = [
   './',
