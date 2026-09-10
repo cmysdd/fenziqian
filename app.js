@@ -24,14 +24,15 @@
   };
   let state = load();
 
-  /* 只补齐旧版本可缺省的容器，ID、金额、扩展字段均原样保留。 */
-  function normalizeData(input) { return FZAnalytics.normalize(input, DEFAULT_SETTINGS); }
-
   function load() {
     try {
       const raw = localStorage.getItem(KEY);
       if (raw) {
-        return normalizeData(JSON.parse(raw));
+        const d = JSON.parse(raw);
+        d.settings = Object.assign({}, DEFAULT_SETTINGS, d.settings || {});
+        d.meta = d.meta || {};
+        d.contacts = d.contacts || []; d.events = d.events || []; d.records = d.records || [];
+        return d;
       }
     } catch (e) { console.error('读取数据失败', e); }
     return { contacts: [], events: [], records: [], settings: { ...DEFAULT_SETTINGS }, meta: { createdAt: Date.now() } };
@@ -754,9 +755,7 @@
     const recs = filteredRecords();
     const t = totals(recs);
     const units = [...new Set(state.contacts.map(c => c.unit).filter(Boolean))].sort();
-    const issueCount = FZAnalytics.audit(state, today()).length;
     return `
-      ${issueCount ? `<div class="notice record-quality">⚠️ 有 <b>${issueCount}</b> 条记录需要核对（日期、金额、方向或关联关系），统计页可查看原因。<a href="#/stats">去统计核对 →</a></div>` : ''}
       <div class="card">
         <div class="card-head"><h2>全部记录 <span class="c-muted" style="font-size:13px;font-weight:400">共 ${recs.length} 条 · 收 <span class="c-in">${money(t.inAmt)}</span> · 送 <span class="c-out">${money(t.outAmt)}</span></span></h2>
           <div class="btn-row"><button class="btn sm" id="exportFiltered">导出当前结果 CSV</button><button class="btn sm" data-act="voice-add">🎤 语音批量</button><button class="btn primary sm" data-act="add-record">＋ 记一笔</button></div></div>
@@ -886,59 +885,44 @@
   }
 
   /* ========== 页面：统计 ========== */
-  const statMoney = n => money(n);
-  function statRows(rows, limit = 10) {
-    const list = rows.filter(r => r.count).slice(0, limit);
-    if (!list.length) return '<div class="empty">暂无可统计数据</div>';
-    const max = Math.max(1, ...list.map(r => r.gross));
-    return `<div class="legend"><span><i style="background:var(--in)"></i>收</span><span><i style="background:var(--out)"></i>送</span></div><div class="rank-bars">${list.map(r => {
-      const net = r.inAmt - r.outAmt;
-      return `<div class="rank-row"><div class="rank-label" title="${esc(r.label)}">${r.link ? `<a href="${r.link}">${esc(r.label)}</a>` : esc(r.label)}</div><div class="rank-main"><div class="rank-track"><span class="rank-fill in" style="width:${r.inAmt / max * 100}%"></span><span class="rank-fill out" style="width:${r.outAmt / max * 100}%"></span></div><div class="rank-meta"><span>收 ${statMoney(r.inAmt)} · 送 ${statMoney(r.outAmt)}</span><b class="${net >= 0 ? 'c-in' : 'c-out'}">${net >= 0 ? '+' : '−'}${statMoney(Math.abs(net))}</b><em>合计 ${statMoney(r.gross)}</em></div></div></div>`;
-    }).join('')}</div>`;
+  function bars(rows, opts = {}) {
+    // rows: [{label, inAmt, outAmt, link?}]
+    const max = Math.max(1, ...rows.map(r => opts.stacked ? r.inAmt + r.outAmt : Math.max(r.inAmt, r.outAmt)));
+    return `<div class="legend"><span><i style="background:var(--in)"></i>收</span><span><i style="background:var(--out)"></i>送</span></div><div class="bars">${rows.map(r => `<div class="bar-row"><div title="${esc(r.label)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.link ? `<a href="${r.link}">${esc(r.label)}</a>` : esc(r.label)}</div>
+      <div>${opts.stacked ? `<div class="bar-track"><div class="bar-fill in" style="width:${r.inAmt / max * 100}%"></div><div class="bar-fill out" style="width:${r.outAmt / max * 100}%"></div></div>` : `<div class="bar-track" style="height:8px;margin-bottom:2px"><div class="bar-fill in" style="width:${r.inAmt / max * 100}%"></div></div><div class="bar-track" style="height:8px"><div class="bar-fill out" style="width:${r.outAmt / max * 100}%"></div></div>`}</div>
+      <div class="bar-val"><span class="c-in">${money(r.inAmt)}</span> / <span class="c-out">${money(r.outAmt)}</span></div></div>`).join('')}</div>`;
   }
-  function statTable(rows, limit = 12) {
-    const list = rows.filter(r => r.count).slice(0, limit);
-    if (!list.length) return '<div class="empty">暂无可统计数据</div>';
-    return `<div class="table-wrap stats-table-wrap"><table><thead><tr><th>对象</th><th class="num">笔数</th><th class="num">收到</th><th class="num">送出</th><th class="num">差额</th><th>最近</th></tr></thead><tbody>${list.map(r => { const n = r.inAmt - r.outAmt; return `<tr><td>${r.link ? `<a href="${r.link}"><b>${esc(r.label)}</b></a>` : `<b>${esc(r.label)}</b>`}</td><td class="num">${r.count}</td><td class="num c-in">${statMoney(r.inAmt)}</td><td class="num c-out">${statMoney(r.outAmt)}</td><td class="num ${n >= 0 ? 'c-in' : 'c-out'}">${n >= 0 ? '+' : '−'}${statMoney(Math.abs(n))}</td><td class="c-muted">${r.last || '—'}</td></tr>`; }).join('')}</tbody></table></div>`;
-  }
-  function balanceTable(rows, title) {
-    const list = rows.filter(r => r.contact).slice(0, 8);
-    return `<h3>${title}（${rows.length} 人）</h3>${list.length ? `<div class="table-wrap stats-table-wrap"><table><thead><tr><th>联系人</th><th class="num">累计收到</th><th class="num">累计送出</th><th class="num">差额</th></tr></thead><tbody>${list.map(r => { const n = r.net; return `<tr><td><a href="#/contacts/${encodeURIComponent(r.key)}"><b>${esc(displayName(r.contact))}</b></a></td><td class="num c-in">${statMoney(r.inAmt)}</td><td class="num c-out">${statMoney(r.outAmt)}</td><td class="num ${n >= 0 ? 'c-in' : 'c-out'}">${n >= 0 ? '+' : '−'}${statMoney(Math.abs(n))}</td></tr>`; }).join('')}</tbody></table></div>` : '<div class="empty">暂无</div>'}`;
-  }
-  function statTrend(rows) {
-    const max = Math.max(1, ...rows.map(r => Math.max(r.inAmt, r.outAmt)));
-    const W = 760, H = 240, L = 54, R = 12, T = 16, B = 38, CW = W - L - R, CH = H - T - B, step = CW / rows.length, bar = Math.max(8, Math.min(18, step * .25));
-    const short = s => s.length > 7 ? s.slice(5) : s;
-    const grid = [0, .25, .5, .75, 1].map(v => { const y = T + CH * (1 - v); return `<line x1="${L}" y1="${y}" x2="${W - R}" y2="${y}" class="chart-grid"/><text x="${L - 8}" y="${y + 4}" text-anchor="end" class="chart-axis">${statMoney(max * v)}</text>`; }).join('');
-    const bars = rows.map((r, i) => { const x = L + i * step + step / 2, ih = r.inAmt / max * CH, oh = r.outAmt / max * CH; return `<g><rect x="${x - bar - 2}" y="${T + CH - ih}" width="${bar}" height="${ih}" rx="3" class="chart-bar in"><title>${esc(r.key)} 收 ${statMoney(r.inAmt)}</title></rect><rect x="${x + 2}" y="${T + CH - oh}" width="${bar}" height="${oh}" rx="3" class="chart-bar out"><title>${esc(r.key)} 送 ${statMoney(r.outAmt)}</title></rect><text x="${x}" y="${H - 13}" text-anchor="middle" class="chart-axis">${esc(short(r.key))}</text></g>`; }).join('');
-    return `<div class="chart-wrap"><svg class="trend-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="收送金额趋势"><title>收送金额趋势</title>${grid}<line x1="${L}" y1="${T + CH}" x2="${W - R}" y2="${T + CH}" class="chart-axis-line"/>${bars}</svg></div>`;
-  }
-  let statsYear = '', statsMode = 'all';
+  let statsYear = '';
   function pageStats() {
     if (!state.records.length) return '<div class="card"><div class="empty">暂无数据</div></div>';
-    const todayDate = today(), years = [...new Set(state.records.map(r => String(r.date || '').slice(0, 4)).filter(y => /^\d{4}$/.test(y) && y <= todayDate.slice(0, 4)))].sort().reverse();
-    const mode = statsYear ? `year:${statsYear}` : statsMode;
-    let a;
-    try { a = FZAnalytics.build(state, { mode }, todayDate); } catch (e) { a = FZAnalytics.build(state, { mode: 'all' }, todayDate); }
-    const labelFor = (r, key) => key === 'person' ? (a.contacts.get(r.key) ? displayName(a.contacts.get(r.key)) : '未关联联系人') : key === 'event' ? (a.events.get(r.key)?.title || '未关联事由') : r.key;
-    const rowsFor = key => a.structures[key].map(r => ({ ...r, label: labelFor(r, key), count: r.count, gross: r.gross, inAmt: r.inAmt, outAmt: r.outAmt, last: r.records.map(x => x.date).sort().slice(-1)[0] || '' }));
-    const persons = a.byPerson.map(r => ({ ...r, label: labelFor(r, 'person'), link: a.contacts.get(r.key) ? '#/contacts/' + encodeURIComponent(r.key) : null, last: r.records.map(x => x.date).sort().slice(-1)[0] || '', gross: r.gross }));
-    const previousText = a.period.comparison ? ` · 对比上期 ${statMoney(a.prevTotals.gross)}（${a.prevTotals.gross ? ((a.totals.gross / a.prevTotals.gross - 1) * 100).toFixed(1) + '%' : '—'}）` : '';
-    const periodText = `${a.period.label}：${a.period.from} 至 ${a.period.to}${previousText}`;
-    const openingNet = a.opening.net, closingNet = a.closing.net, issueCount = a.issues.length;
-    const concentration = persons.length ? persons.slice(0, 3).reduce((s, r) => s + r.gross, 0) / Math.max(1, a.totals.gross) * 100 : 0;
-    const modes = [{ value: 'all', label: '全部历史' }, { value: 'ytd', label: '本年截至今天' }, { value: 'last12', label: '近 12 个月' }, ...years.map(y => ({ value: `year:${y}`, label: `${y} 年` }))];
-    const audit = issueCount ? `<a href="#/records">有 ${issueCount} 条记录需要核对 →</a>` : '记录字段完整，未发现明显异常';
+    const yearsAll = [...new Set(state.records.map(r => (r.date || '').slice(0, 4)))].sort().reverse();
+    const recs = statsYear ? state.records.filter(r => r.date.startsWith(statsYear)) : state.records;
+    const agg = (m) => [...m.entries()].map(([k, rs]) => ({ key: k, ...totals(rs) }));
+    const byYear = agg(groupBy(state.records, r => (r.date || '').slice(0, 4))).sort((a, b) => a.key.localeCompare(b.key));
+    const byType = agg(groupBy(recs, r => eventById(r.eventId)?.type || '其他')).sort((a, b) => (b.inAmt + b.outAmt) - (a.inAmt + a.outAmt));
+    const byUnit = agg(groupBy(recs, r => contactById(r.contactId)?.unit || '（未填单位）')).sort((a, b) => (b.inAmt + b.outAmt) - (a.inAmt + a.outAmt)).slice(0, 15);
+    const byDept = agg(groupBy(recs.filter(r => contactById(r.contactId)?.dept), r => { const c = contactById(r.contactId); return `${c.unit ? c.unit + ' / ' : ''}${c.dept}`; })).sort((a, b) => (b.inAmt + b.outAmt) - (a.inAmt + a.outAmt)).slice(0, 15);
+    const byMonth = Array.from({ length: 12 }, (_, i) => { const mm = String(i + 1).padStart(2, '0'); return { key: `${i + 1} 月`, ...totals(recs.filter(r => r.date.slice(5, 7) === mm)) }; });
+    const byPerson = agg(groupBy(recs, r => r.contactId)).sort((a, b) => (b.inAmt + b.outAmt) - (a.inAmt + a.outAmt)).slice(0, 15);
+    const byMethod = agg(groupBy(recs, r => r.method || '未填'));
+    const byRelation = agg(groupBy(recs, r => contactById(r.contactId)?.relation || '未填'));
+    const toRows = (arr, linkFn) => arr.map(a => ({ label: linkFn ? (contactById(a.key) ? displayName(contactById(a.key)) : a.key) : a.key, inAmt: a.inAmt, outAmt: a.outAmt, link: linkFn ? linkFn(a.key) : null }));
+    const t = totals(recs);
     return `
-      <div class="stats-head"><div><div class="eyebrow">经营视角 · 人情往来</div><h1>统计分析</h1><p class="c-muted">${esc(periodText)} · 收送差额 = 收 − 送</p></div><label class="stats-period">分析期间<select id="statsPeriod">${options(modes, mode)}</select></label></div>
-      <div class="stats-kpis"><div class="stat"><div class="label">本期往来总额</div><div class="value">${statMoney(a.totals.gross)}</div><div class="sub">收 ${statMoney(a.totals.inAmt)} · 送 ${statMoney(a.totals.outAmt)}</div></div><div class="stat"><div class="label">本期收送差额</div><div class="value ${a.totals.net >= 0 ? 'c-in' : 'c-out'}">${a.totals.net >= 0 ? '+' : '−'}${statMoney(Math.abs(a.totals.net))}</div><div class="sub">期内结果</div></div><div class="stat"><div class="label">截至期末人情差额</div><div class="value ${closingNet >= 0 ? 'c-in' : 'c-out'}">${closingNet >= 0 ? '+' : '−'}${statMoney(Math.abs(closingNet))}</div><div class="sub">累计收 − 累计送</div></div><div class="stat"><div class="label">活跃对象</div><div class="value">${new Set(a.records.map(r => r.contactId)).size}</div><div class="sub">涉及 ${new Set(a.records.map(r => r.eventId)).size} 个事由</div></div><div class="stat"><div class="label">笔均 / 中位数</div><div class="value">${statMoney(a.totals.count ? a.totals.gross / a.totals.count : 0)}</div><div class="sub">中位数 ${statMoney(a.median)}</div></div></div>
-      <div class="stats-insights"><span>期初累计差额：<b>${openingNet >= 0 ? '+' : '−'}${statMoney(Math.abs(openingNet))}</b></span><span>期内收礼笔均：<b>${statMoney(a.totals.inCnt ? a.totals.inAmt / a.totals.inCnt : 0)}</b></span><span>期内送礼笔均：<b>${statMoney(a.totals.outCnt ? a.totals.outAmt / a.totals.outCnt : 0)}</b></span><span>Top 3 对象占总额：<b>${concentration.toFixed(1)}%</b></span><span class="${issueCount ? 'c-warn' : 'c-in'}">${audit}</span></div>
-      <div class="stats-layout"><section class="card stats-wide"><div class="card-head"><div><h2>收送趋势</h2><p class="chart-caption">按月展示；跨度超过 24 个月时自动按年汇总</p></div><div class="legend"><span><i style="background:var(--in)"></i>收</span><span><i style="background:var(--out)"></i>送</span></div></div>${statTrend(a.trend)}</section><section class="card"><h2>收送结构</h2><p class="chart-caption">按业务维度拆分，优先关注差额和总额</p>${statRows(rowsFor('type'), 8)}</section></div>
-      <div class="stats-layout"><section class="card"><h2>往来对象</h2><p class="chart-caption">按本期金额排序；累计差额见联系人详情</p>${statTable(persons)}</section><section class="card"><h2>单位 / 科室</h2><p class="chart-caption">用于识别集中往来来源</p><div class="stats-subhead">单位</div>${statRows(rowsFor('unit'), 8)}<div class="stats-subhead">科室</div>${statRows(rowsFor('dept'), 8)}</section></div>
-      <div class="stats-layout"><section class="card"><h2>关系 / 支付方式</h2><div class="stats-subhead">关系</div>${statRows(rowsFor('relation'), 8)}<div class="stats-subhead">支付方式</div>${statRows(rowsFor('method'), 8)}</section><section class="card"><h2>人情余额</h2><p class="chart-caption">截至期末累计净额，正数表示收得更多，负数表示对方尚未回礼</p><div class="balance-list">${balanceTable(a.positive, '我欠人情')}${balanceTable(a.negative, '对方欠我')}</div></section></div>
-      <div class="card stats-audit"><div class="card-head"><div><h2>数据核对</h2><p class="chart-caption">统计只纳入日期、方向、金额有效且不晚于今天的记录，原始记录不会被删除。</p></div><b class="${issueCount ? 'c-warn' : 'c-in'}">${issueCount ? issueCount + ' 条需检查' : '未发现问题'}</b></div>${issueCount ? `<div class="audit-list">${a.issues.slice(0, 8).map(x => `<div class="audit-item"><span>${esc(x.record.date || '无日期')} · ${esc(x.record.note || x.record.id)}</span><b>${esc(x.reasons.join('、'))}</b></div>`).join('')}${issueCount > 8 ? `<div class="c-muted">还有 ${issueCount - 8} 条，请到记录页筛选核对。</div>` : ''}</div>` : '<div class="empty">金额、日期、方向和关联关系均可用于统计。</div>'}</div>`;
+      <div class="card-head"><h2 style="margin:0">统计${statsYear ? ` · ${statsYear} 年` : ' · 全部年份'}</h2>
+        <select id="statsYear" style="padding:6px 10px;border:1px solid var(--border);border-radius:8px">${options([{ value: '', label: '全部年份' }, ...yearsAll.map(y => ({ value: y, label: y + ' 年' }))], statsYear)}</select></div>
+      ${statCards(t)}
+      <div class="grid grid-2" style="margin-top:16px">
+        <div class="card"><h2>按年份</h2>${bars(toRows(byYear))}</div>
+        <div class="card"><h2>按月份${statsYear ? '' : '（所有年份合计）'}</h2>${bars(toRows(byMonth))}</div>
+        <div class="card"><h2>按事由类型</h2>${bars(toRows(byType))}</div>
+        <div class="card"><h2>往来最多的人（前 15）</h2>${bars(toRows(byPerson, k => '#/contacts/' + k))}</div>
+        <div class="card"><h2>按单位（前 15）</h2>${bars(toRows(byUnit))}</div>
+        <div class="card"><h2>按科室（前 15）</h2>${byDept.length ? bars(toRows(byDept)) : '<div class="empty">未填写科室</div>'}</div>
+        <div class="card"><h2>按关系</h2>${bars(toRows(byRelation))}</div>
+        <div class="card"><h2>按支付方式</h2>${bars(toRows(byMethod))}</div>
+      </div>`;
   }
-
 
   /* ========== 页面：设置 ========== */
   function pageSettings() {
@@ -998,13 +982,13 @@
     const reader = new FileReader();
     reader.onload = () => {
       let d;
-      try { d = JSON.parse(reader.result); if (!Array.isArray(d.records) || !Array.isArray(d.contacts)) throw 0; d = normalizeData(d); } catch { return toast('文件格式不正确', true); }
+      try { d = JSON.parse(reader.result); if (!Array.isArray(d.records) || !Array.isArray(d.contacts)) throw 0; } catch { return toast('文件格式不正确', true); }
       const m = openModal(`<h2>导入备份</h2>
         <p>文件包含：<b>${d.contacts.length}</b> 位联系人，<b>${(d.events || []).length}</b> 个事由，<b>${d.records.length}</b> 条记录。</p>
         <p>当前已有：${state.contacts.length} 位联系人，${state.events.length} 个事由，${state.records.length} 条记录。</p>
         <div class="actions"><button class="btn" data-cancel>取消</button><button class="btn" data-merge>合并（按 ID 去重）</button><button class="btn danger" data-replace>覆盖现有数据</button></div>`);
       $('[data-cancel]', m).onclick = closeModal;
-      $('[data-replace]', m).onclick = () => { state = normalizeData(d); save(); closeModal(); toast('已覆盖导入'); render(); };
+      $('[data-replace]', m).onclick = () => { state = { ...d, settings: Object.assign({}, DEFAULT_SETTINGS, d.settings || {}), meta: d.meta || {} }; save(); closeModal(); toast('已覆盖导入'); render(); };
       $('[data-merge]', m).onclick = () => {
         const merge = (a, b) => { const ids = new Set(a.map(x => x.id)); return a.concat(b.filter(x => !ids.has(x.id))); };
         state.contacts = merge(state.contacts, d.contacts); state.events = merge(state.events, d.events || []); state.records = merge(state.records, d.records);
@@ -1104,7 +1088,7 @@
       }
       const cm = $('#cmode', view); if (cm) cm.onchange = () => { contactView.mode = cm.value; render(); };
     }
-    if (page === 'stats') { const sy = $('#statsPeriod', view); if (sy) sy.onchange = () => { statsYear = sy.value.startsWith('year:') ? sy.value.slice(5) : ''; statsMode = sy.value.startsWith('year:') ? 'all' : sy.value; render(); }; }
+    if (page === 'stats') { const sy = $('#statsYear', view); if (sy) sy.onchange = () => { statsYear = sy.value; render(); }; }
     if (page === 'settings') {
       const ib = $('#installBtn', view); if (ib) ib.onclick = async () => { if (!installPrompt) return; installPrompt.prompt(); await installPrompt.userChoice; installPrompt = null; render(); };
       $('#exportJson', view).onclick = exportJson;
