@@ -1033,14 +1033,59 @@
     const demoBtn = $('#loadDemo', view); if (demoBtn) demoBtn.onclick = loadDemo;
     if (page === 'records') {
       const filt = $('#filters', view);
-      let timer;
-      filt.addEventListener('input', e => { const { name, value } = e.target; if (!name) return; recFilter[name] = value; clearTimeout(timer); timer = setTimeout(() => { const active = e.target.name; render(); const el = $(`#filters [name=${active}]`); if (el && el.tagName === 'INPUT') { el.focus(); el.setSelectionRange && el.type === 'text' && el.setSelectionRange(el.value.length, el.value.length); } }, e.target.tagName === 'SELECT' ? 0 : 300); });
+      let timer, composing = false;
+      const scheduleFilterRender = (target, delay) => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          if (composing) return;
+          const active = target.name;
+          render();
+          const el = $(`#filters [name=${active}]`);
+          if (el && el.tagName === 'INPUT') { el.focus(); el.setSelectionRange && el.type === 'text' && el.setSelectionRange(el.value.length, el.value.length); }
+        }, delay);
+      };
+      filt.addEventListener('compositionstart', () => { composing = true; clearTimeout(timer); });
+      filt.addEventListener('compositionend', e => {
+        composing = false;
+        if (!e.target.name) return;
+        recFilter[e.target.name] = e.target.value;
+        scheduleFilterRender(e.target, 300);
+      });
+      filt.addEventListener('input', e => {
+        const { name, value } = e.target;
+        if (!name) return;
+        if (composing || e.isComposing || e.inputType === 'insertCompositionText') return;
+        recFilter[name] = value;
+        scheduleFilterRender(e.target, e.target.tagName === 'SELECT' ? 0 : 300);
+      });
       $('#resetFilter', view).onclick = () => { Object.assign(recFilter, { q: '', dir: '', eventId: '', unit: '', from: '', to: '', min: '', max: '' }); render(); };
       $('#exportFiltered', view).onclick = () => exportRecordsCsv(filteredRecords(), '份子钱流水');
       $$('th.sortable', view).forEach(th => th.onclick = () => { const k = th.dataset.sort; if (recFilter.sortKey === k) recFilter.sortDir = recFilter.sortDir === 'asc' ? 'desc' : 'asc'; else { recFilter.sortKey = k; recFilter.sortDir = k === 'amount' || k === 'date' ? 'desc' : 'asc'; } render(); });
     }
     if (page === 'contacts') {
-      const cq = $('#cq', view); if (cq) { let t; cq.oninput = () => { contactView.q = cq.value; clearTimeout(t); t = setTimeout(() => { render(); const el = $('#cq'); el.focus(); el.setSelectionRange(el.value.length, el.value.length); }, 250); }; }
+      const cq = $('#cq', view); if (cq) {
+        let t, composing = false;
+        const scheduleContactRender = (target, delay) => {
+          clearTimeout(t);
+          t = setTimeout(() => {
+            if (composing) return;
+            render();
+            const el = $('#cq');
+            if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+          }, delay);
+        };
+        cq.addEventListener('compositionstart', () => { composing = true; clearTimeout(t); });
+        cq.addEventListener('compositionend', () => {
+          composing = false;
+          contactView.q = cq.value;
+          scheduleContactRender(cq, 250);
+        });
+        cq.oninput = e => {
+          if (composing || e.isComposing || e.inputType === 'insertCompositionText') return;
+          contactView.q = cq.value;
+          scheduleContactRender(cq, 250);
+        };
+      }
       const cm = $('#cmode', view); if (cm) cm.onchange = () => { contactView.mode = cm.value; render(); };
     }
     if (page === 'stats') { const sy = $('#statsYear', view); if (sy) sy.onchange = () => { statsYear = sy.value; render(); }; }
