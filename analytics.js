@@ -4,14 +4,33 @@
   const object = x => x && typeof x === 'object' && !Array.isArray(x);
   function normalize(data, defaults = {}) {
     if (!object(data)) throw new Error('备份必须是 JSON 对象');
-    const result = { ...data, contacts: Array.isArray(data.contacts) ? data.contacts : [], events: Array.isArray(data.events) ? data.events : [], records: Array.isArray(data.records) ? data.records : [], settings: { ...defaults, ...(object(data.settings) ? data.settings : {}) }, meta: object(data.meta) ? { ...data.meta } : {} };
+    const result = { ...data, contacts: data.contacts ?? [], events: data.events ?? [], records: data.records ?? [], settings: { ...defaults, ...(object(data.settings) ? data.settings : {}) }, meta: object(data.meta) ? { ...data.meta } : {} };
     for (const key of ['contacts', 'events', 'records']) {
-      result[key] = result[key].filter(object).map(x => ({ ...x, id: typeof x.id === 'string' && x.id ? x.id : `legacy-${key}-${Math.random().toString(36).slice(2, 10)}` }));
+      if (!Array.isArray(result[key]) || result[key].some(x => !object(x))) throw new Error(key + ' 格式有误，请核对备份文件');
+      const ids = new Set();
+      result[key] = result[key].map(x => {
+        if (!['string', 'number'].includes(typeof x.id) || String(x.id) === '' || ids.has(String(x.id))) throw new Error(key + ' 存在缺少或重复的 ID，未导入任何数据');
+        ids.add(String(x.id));
+        return { ...x }; // 保留旧 ID（包括数字 ID），不随机替换，不丢弃条目。
+      });
     }
     for (const key of ['eventTypes', 'methods']) {
       if (!Array.isArray(result.settings[key]) || !result.settings[key].length || result.settings[key].some(x => typeof x !== 'string')) result.settings[key] = [...(defaults[key] || [])];
     }
     return result;
+  }
+  function mergePreview(current, incoming) {
+    const canonical = x => JSON.stringify(x, Object.keys(x).sort());
+    const counts = {};
+    const result = { ...incoming, ...current, settings: { ...incoming.settings, ...current.settings }, meta: { ...incoming.meta, ...current.meta } };
+    for (const key of ['contacts', 'events', 'records']) {
+      const known = new Map(current[key].map(x => [String(x.id), x]));
+      const added = incoming[key].filter(x => !known.has(String(x.id)));
+      const conflicts = incoming[key].filter(x => known.has(String(x.id)) && canonical(x) !== canonical(known.get(String(x.id))));
+      counts[key] = { added: added.length, matched: incoming[key].length - added.length, conflicts: conflicts.length };
+      result[key] = [...current[key], ...added];
+    }
+    return { result, counts };
   }
   function validDate(s) {
     if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
@@ -114,6 +133,6 @@
     const structures = Object.fromEntries(Object.entries(dimensions).map(([key, fn]) => [key, group(records, fn)]));
     return { period, records, previous, totals, prevTotals: summarize(previous), opening, closing, byPerson, balances, positive, negative, median, trend, monthly, structures, contacts, events, issues: audit(data, today), excluded: data.records.filter(r => !validRecord(r)).length, future: valid.filter(r => r.date > today).length };
   }
-  root.FZAnalytics = { normalize, validDate, cents, validRecord, summarize, periodFor, group, audit, build };
+  root.FZAnalytics = { normalize, mergePreview, validDate, cents, validRecord, summarize, periodFor, group, audit, build };
   if (typeof module !== 'undefined') module.exports = root.FZAnalytics;
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -22,6 +22,7 @@
     backupRemindDays: 30,
     returnRatio: 1.0
   };
+  let loadError = '';
   let state = load();
 
   /* 只补齐旧版本可缺省的容器，ID、金额、扩展字段均原样保留。 */
@@ -33,15 +34,16 @@
       if (raw) {
         return normalizeData(JSON.parse(raw));
       }
-    } catch (e) { console.error('读取数据失败', e); }
+    } catch (e) { loadError = e.message; console.error('读取数据失败', e); }
     return { contacts: [], events: [], records: [], settings: { ...DEFAULT_SETTINGS }, meta: { createdAt: Date.now() } };
   }
   function save() {
+    if (loadError) throw new Error('原始账本读取失败，已阻止覆盖，请先导出原始数据');
     state.meta.updatedAt = Date.now();
     localStorage.setItem(KEY, JSON.stringify(state));
   }
-  const contactById = id => state.contacts.find(c => c.id === id);
-  const eventById = id => state.events.find(e => e.id === id);
+  const contactById = id => state.contacts.find(c => String(c.id) === String(id));
+  const eventById = id => state.events.find(e => String(e.id) === String(id));
   const contactLabel = c => c ? (c.name + (c.unit || c.dept ? `（${[c.unit, c.dept].filter(Boolean).join('-')}）` : '')) : '（已删除）';
   const eventLabel = e => e ? e.title : '（未关联事由）';
 
@@ -55,8 +57,8 @@
   /* ========== 统计核心 ========== */
   function recordsOf(filter = {}) {
     return state.records.filter(r =>
-      (!filter.contactId || r.contactId === filter.contactId) &&
-      (!filter.eventId || r.eventId === filter.eventId)
+      (!filter.contactId || String(r.contactId) === String(filter.contactId)) &&
+      (!filter.eventId || String(r.eventId) === String(filter.eventId))
     );
   }
   function totals(recs) {
@@ -266,13 +268,13 @@
     const updateRef = () => {
       const cid = $('[name=contactId]', m).value; const hint = $('#refHint', m);
       if (!cid) { hint.textContent = ''; return; }
-      const recs = recordsOf({ contactId: cid }).sort(byDateDesc);
+      const recs = recordsOf({ contactId: cid }).filter(x => x.id !== r.id && FZAnalytics.validRecord(x) && x.date <= today()).sort(byDateDesc);
       const dirNow = $('.seg input:checked', m).value;
       const lastOpp = recs.find(x => x.direction !== dirNow);
-      const bal = balanceOf(cid);
+      const bal = FZAnalytics.summarize(recs).net;
       let txt = '';
       if (lastOpp) txt += `上次${lastOpp.direction === 'in' ? '对方给我' : '我给对方'} ${money(lastOpp.amount)} 元（${lastOpp.date}）。`;
-      if (bal > 0) txt += `目前我欠对方人情 ${money(bal)} 元。`; else if (bal < 0) txt += `目前对方欠我人情 ${money(-bal)} 元。`;
+      if (bal > 0) txt += `累计收多于送 ${money(bal)} 元，仅供参考。`; else if (bal < 0) txt += `累计送多于收 ${money(-bal)} 元，仅供参考。`;
       if (dirNow === 'out' && lastOpp && state.settings.returnRatio) txt += ` 参考回礼：${money(Math.round(lastOpp.amount * state.settings.returnRatio))} 元。`;
       hint.textContent = txt;
     };
@@ -298,6 +300,9 @@
       if (!names.length) return toast('请填写姓名', true);
       if (r.id && names.length > 1) return toast('编辑记录时只能填一个人', true);
       const base = { eventId: d.eventId, direction: d.direction, amount: Number(d.amount), date: d.date, method: d.method, note: d.note };
+      if (!FZAnalytics.validRecord(base)) return toast('请填写有效日期、方向和金额', true);
+      const similar = state.records.filter(x => x.id !== r.id && names.includes(contactById(x.contactId)?.name) && String(x.eventId) === String(d.eventId) && x.direction === d.direction && x.date === d.date && Number(x.amount) === base.amount);
+      if (similar.length && !confirm(`找到 ${similar.length} 笔同名、同事由、同日、同方向且同金额的记录。请核对是否重复，仍要保存吗？`)) return;
       if (r.id) Object.assign(state.records.find(x => x.id === r.id), { ...base, contactId: resolveContact(names[0], d.unit, d.dept, d.contactId) });
       else {
         const before = state.contacts.length;
@@ -612,12 +617,18 @@
   function route() {
     const h = location.hash.replace(/^#\/?/, '') || 'home';
     const [page, id] = h.split('/');
-    return { page, id };
+    let decoded = id; try { if (id) decoded = decodeURIComponent(id); } catch {}
+    return { page, id: decoded };
   }
   function render() {
     const { page, id } = route();
     $$('#tabs a').forEach(a => a.classList.toggle('active', a.dataset.tab === page));
     const view = $('#view');
+    if (loadError) {
+      view.innerHTML = `<section class="card"><h1>原始账本暂时无法读取</h1><p>${esc(loadError)}</p><p>原始数据仍保留在本机。请先下载原始文件，再核对修复；本次已暂停写入。</p><button class="btn primary" id="downloadOriginal">下载原始数据</button></section>`;
+      $('#downloadOriginal').onclick = () => download('账本原始数据.json', localStorage.getItem(KEY) || '', 'application/json');
+      return;
+    }
     const pages = { home: pageHome, records: pageRecords, events: id ? () => pageEventDetail(id) : pageEvents, contacts: id ? () => pageContactDetail(id) : pageContacts, stats: pageStats, settings: pageSettings };
     view.innerHTML = (pages[page] || pageHome)();
     window.scrollTo(0, 0);
@@ -628,7 +639,18 @@
     view.addEventListener('click', e => {
       const el = e.target.closest('[data-act]'); if (!el) return;
       const { act, id } = el.dataset;
-      if (act === 'edit-record') recordForm(state.records.find(r => r.id === id));
+      if (act === 'backup') return exportJson();
+      if (act === 'record-preset' || act === 'home-records') { setRecordPreset(el.dataset.preset); if (el.dataset.dir) recFilter.dir = el.dataset.dir; if (route().page === 'records') render(); else location.hash = '#/records'; return; }
+      if (act === 'record-page') { recordPage = Math.max(1, Number(el.dataset.page)); render(); return; }
+      if (act === 'person-records') return goRecords({ contactId: id });
+      if (act === 'contact-scope') { contactView.balance = el.dataset.scope; contactView.q = ''; if (route().page === 'contacts') render(); else location.hash = '#/contacts'; return; }
+      if (act === 'event-scope') { eventView.scope = el.dataset.scope; eventView.q = ''; eventView.mine = ''; if (route().page === 'events') render(); else location.hash = '#/events'; return; }
+      if (act === 'review-event') {
+        const ev = eventById(id), rs = recordsOf({eventId:id});
+        if (!ev || !rs.length) return;
+        confirmDialog(`已对照礼簿或转账记录核对「${esc(ev.title)}」的 ${rs.length} 笔名单？修改明细后会重新提示核对。`, () => { ev.reviewSignature = eventSignature(id); ev.reviewedAt = Date.now(); save(); render(); toast('名单已标记为核对完成'); }, '确认已核对', false); return;
+      }
+      if (act === 'edit-record') recordForm(state.records.find(r => String(r.id) === id));
       else if (act === 'add-record') {
         const presets = { eventId: el.dataset.event, contactId: el.dataset.contact, direction: el.dataset.dir };
         if (!state.events.length) { toast('请先新增一个事由'); eventForm({}, created => recordForm({}, { ...presets, eventId: created.id })); }
@@ -653,7 +675,7 @@
     const sortKey = opts.sortKey, sortDir = opts.sortDir;
     const th = (k, label, cls = '') => cols[k] ? `<th class="${cls} ${opts.sortable ? 'sortable' : ''}" data-sort="${k}">${label}${sortKey === k ? (sortDir === 'asc' ? ' ↑' : ' ↓') : ''}</th>` : '';
     return `<div class="table-wrap"><table>
-      <thead><tr>${th('date', '日期')}${th('contact', '姓名')}${th('unit', '单位/科室')}${th('event', '事由')}${th('dir', '方向')}${th('amount', '金额', 'num')}${th('method', '方式')}${cols.note ? '<th>备注</th>' : ''}${cols.ops ? '<th class="no-print"></th>' : ''}</tr></thead>
+      <thead><tr>${th('date', '日期')}${th('contact', '姓名')}${th('unit', '单位/科室')}${th('event', '事由')}${th('dir', '方向')}${th('amount', '金额', 'num')}${th('method', '方式')}${cols.note ? '<th>备注</th>' : ''}${opts.issues ? '<th>核对提示</th>' : ''}${cols.ops ? '<th class="no-print"></th>' : ''}</tr></thead>
       <tbody>${recs.map(r => {
         const c = contactById(r.contactId), ev = eventById(r.eventId);
         return `<tr>
@@ -665,6 +687,7 @@
           ${cols.amount ? `<td class="num ${r.direction === 'in' ? 'c-in' : 'c-out'}"><b>${r.direction === 'in' ? '+' : '-'}${money(r.amount)}</b></td>` : ''}
           ${cols.method ? `<td class="c-muted">${esc(r.method || '')}</td>` : ''}
           ${cols.note ? `<td class="wrap c-muted">${esc(r.note || '')}</td>` : ''}
+          ${opts.issues ? `<td class="wrap audit-reason">${esc((opts.issues.get(r.id) || []).join(' / ')) || '—'}</td>` : ''}
           ${cols.ops ? `<td class="no-print"><button class="btn link sm" data-act="edit-record" data-id="${r.id}">编辑</button></td>` : ''}
         </tr>`;
       }).join('')}</tbody></table></div>`;
@@ -675,68 +698,83 @@
       <div class="stat"><div class="label">${labels.inn || '收到（对方给我）'}</div><div class="value c-in">${money(t.inAmt)}</div><div class="sub">${t.inCnt} 笔</div></div>
       <div class="stat"><div class="label">${labels.out || '送出（我给对方）'}</div><div class="value c-out">${money(t.outAmt)}</div><div class="sub">${t.outCnt} 笔</div></div>
       <div class="stat"><div class="label">${labels.net || '净额（收 − 送）'}</div><div class="value ${net >= 0 ? 'c-in' : 'c-out'}">${net >= 0 ? '+' : '-'}${money(Math.abs(net))}</div><div class="sub">${labels.netSub || ''}</div></div>
-      <div class="stat"><div class="label">${labels.cnt || '总笔数'}</div><div class="value">${t.count}</div><div class="sub">${labels.cntSub || ''}</div></div>
+      <div class="stat"><div class="label">${labels.cnt || '总笔数'}</div><div class="value">${labels.countValue ?? t.count}</div><div class="sub">${labels.cntSub || ''}</div></div>
     </div>`;
   }
 
   /* ========== 页面：总览 ========== */
+  const occurred = () => state.records.filter(r => FZAnalytics.validRecord(r) && r.date <= today());
+  const linkTo = (page, id) => '#/' + page + '/' + encodeURIComponent(id);
+  function moduleHead(title, note, actions = '') {
+    return `<div class="module-head"><div><h1>${title}</h1><p>${note}</p></div><div class="btn-row no-print">${actions}</div></div>`;
+  }
+  function contactSummaries() {
+    const groups = groupBy(occurred(), r => String(r.contactId));
+    return state.contacts.map(c => {
+      const rs = (groups.get(String(c.id)) || []).slice().sort(byDateDesc), t = FZAnalytics.summarize(rs);
+      return { c, t, bal: t.net, last: rs[0], lastIn: rs.find(r => r.direction === 'in'), lastOut: rs.find(r => r.direction === 'out') };
+    });
+  }
+  function eventSignature(id) {
+    return JSON.stringify(recordsOf({ eventId: id }).map(r => [r.id, r.contactId, r.direction, r.amount, r.date, r.method, r.note]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
+  }
+  function eventStatus(e) {
+    const rs = recordsOf({ eventId: e.id });
+    if (!FZAnalytics.validDate(e.date)) return { key: 'undated', text: '日期待核对', cls: 'amber' };
+    if (e.date > today()) return { key: 'upcoming', text: daysBetween(today(), e.date) + ' 天后', cls: 'blue' };
+    if (!rs.length) return { key: 'unrecorded', text: '尚未记账', cls: 'amber' };
+    if (e.reviewSignature === eventSignature(e.id)) return { key: 'reviewed', text: '名单已核对', cls: 'green' };
+    return { key: 'recorded', text: '已记 ' + rs.length + ' 笔 · 待核对', cls: '' };
+  }
+  function statusTag(s) { return `<span class="status-tag ${s.cls}">${esc(s.text)}</span>`; }
+  function setRecordPreset(preset) {
+    Object.assign(recFilter, { q: '', dir: '', contactId: '', eventId: '', unit: '', from: '', to: '', min: '', max: '', issue: '' });
+    if (preset === 'month') { recFilter.from = today().slice(0, 7) + '-01'; recFilter.to = today(); }
+    if (preset === 'year') { recFilter.from = today().slice(0, 4) + '-01-01'; recFilter.to = today(); }
+    if (preset === 'issues') recFilter.issue = 'all';
+    recordPage = 1;
+  }
+  function goRecords(values = {}) {
+    setRecordPreset('all'); Object.assign(recFilter, values);
+    if (route().page === 'records') render(); else location.hash = '#/records';
+  }
   function pageHome() {
-    const year = new Date().getFullYear();
-    const yearRecs = state.records.filter(r => (r.date || '').startsWith(year));
-    const ty = totals(yearRecs), ta = totals(state.records);
-    const recent = state.records.slice().sort(byDateDesc).slice(0, 10);
-    // 待回礼：对方给我多于我给对方的人
-    const owe = state.contacts.map(c => ({ c, bal: balanceOf(c.id), last: recordsOf({ contactId: c.id }).sort(byDateDesc)[0] })).filter(x => x.bal > 0).sort((a, b) => b.bal - a.bal);
-    // 即将到来的事由（未来 30 天）
-    const t = today();
-    const upcoming = state.events.filter(e => e.date >= t && daysBetween(t, e.date) <= 30).sort(byDateAsc);
-    // 备份提醒
-    const lastBackup = state.meta.lastBackupAt;
-    const needBackup = state.records.length > 0 && (!lastBackup || (Date.now() - lastBackup) / 86400000 > state.settings.backupRemindDays);
-
-    if (!state.records.length && !state.contacts.length) {
-      return `<div class="card" style="text-align:center;padding:50px 20px">
-        <h2 style="font-size:22px">欢迎使用份子钱记账本</h2>
-        <p class="c-muted">记录每一笔人情往来，按事、按人统计，再也不怕忘了回礼。<br>数据只保存在本机浏览器中，请定期在「设置」中导出备份。</p>
-        <div class="btn-row" style="justify-content:center;margin-top:20px">
-          <button class="btn primary" data-act="add-record">＋ 记第一笔</button>
-          <button class="btn" id="loadDemo">载入示例数据体验</button>
-        </div></div>`;
-    }
-    return `
-      ${needBackup ? `<div class="notice">⚠️ ${lastBackup ? `已有 ${Math.floor((Date.now() - lastBackup) / 86400000)} 天未备份` : '尚未备份过数据'}，浏览器清理缓存会导致数据丢失。<a href="#/settings">去备份 →</a></div>` : ''}
-      <h3 class="c-muted" style="margin:0 0 8px">${year} 年</h3>
-      ${statCards(ty, { netSub: '本年', cntSub: '本年' })}
-      <div class="grid grid-2" style="margin-top:16px">
-        <div class="card"><h2>累计往来</h2>
-          <dl class="kv">
-            <dt>累计收到</dt><dd class="c-in"><b>${money(ta.inAmt)}</b> 元 / ${ta.inCnt} 笔</dd>
-            <dt>累计送出</dt><dd class="c-out"><b>${money(ta.outAmt)}</b> 元 / ${ta.outCnt} 笔</dd>
-            <dt>往来人数</dt><dd>${state.contacts.length} 人</dd>
-            <dt>事由数量</dt><dd>${state.events.length} 件</dd>
-          </dl></div>
-        <div class="card"><h2>近期事由（30 天内）</h2>
-          ${upcoming.length ? upcoming.map(e => `<div class="list-item"><div><a class="title" href="#/events/${e.id}">${esc(e.title)}</a><div class="meta">${e.date} · ${esc(e.type)} ${e.isMine ? '<span class="tag mine">我家</span>' : ''}</div></div><div class="meta">${daysBetween(t, e.date) === 0 ? '今天' : daysBetween(t, e.date) + ' 天后'}</div></div>`).join('') : '<div class="empty">近期没有事由</div>'}
-        </div>
-      </div>
-      <div class="grid grid-2">
-        <div class="card"><div class="card-head"><h2>待回礼（我欠人情）</h2><span class="c-muted">${owe.length} 人</span></div>
-          ${owe.length ? owe.slice(0, 8).map(x => `<div class="list-item"><div><a class="title" href="#/contacts/${x.c.id}">${esc(displayName(x.c))}</a><div class="meta">${esc([x.c.unit, x.c.dept].filter(Boolean).join(' / '))} · 最近 ${x.last?.date || ''}</div></div><div class="c-in"><b>${money(x.bal)}</b> 元</div></div>`).join('') : '<div class="empty">没有欠着的人情 👍</div>'}
-        </div>
-        <div class="card"><div class="card-head"><h2>最近记录</h2><a href="#/records">查看全部 →</a></div>
-          ${recent.length ? recent.map(r => { const c = contactById(r.contactId); return `<div class="list-item"><div><span class="title">${esc(displayName(c))}</span> <span class="meta">${esc(eventLabel(eventById(r.eventId)))}</span><div class="meta">${r.date}</div></div><div class="${r.direction === 'in' ? 'c-in' : 'c-out'}"><b>${r.direction === 'in' ? '+' : '-'}${money(r.amount)}</b></div></div>`; }).join('') : '<div class="empty">暂无记录</div>'}
-        </div>
-      </div>`;
+    const date = today(), month = FZAnalytics.summarize(occurred().filter(r => r.date.startsWith(date.slice(0, 7))));
+    const people = contactSummaries(), moreIn = people.filter(x => x.bal > 0).sort((a, b) => b.bal - a.bal);
+    const upcoming = state.events.filter(e => e.date >= date && daysBetween(date, e.date) <= 60).sort(byDateAsc);
+    const unrecorded = state.events.filter(e => eventStatus(e).key === 'unrecorded');
+    const issues = FZAnalytics.audit(state, date);
+    const backup = state.meta.lastBackupAt, days = Number(state.settings.backupRemindDays);
+    const needBackup = (state.records.length || state.contacts.length || state.events.length) && days > 0 && (!backup || (Date.now() - backup) / 86400000 > days);
+    const recent = state.records.slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0) || byDateDesc(a, b)).slice(0, 6);
+    return '<section class="home-hero"><div><div class="eyebrow">' + date.replace(/-/g, ' / ') + ' · 我的往来账本</div><h1>记下每一份心意。</h1><p>谁来过、送了多少、下次怎么回礼，都有据可查。</p><div class="btn-row"><button class="btn primary" data-act="add-record">＋ 记一笔</button><button class="btn" data-act="add-event">新建事由</button><a class="btn" href="#/contacts">查一个人</a></div></div><div class="hero-note"><span>这本账里</span><strong>' + state.contacts.length + '<small> 位亲友</small></strong><span>' + state.events.length + ' 件事由 · ' + state.records.length + ' 笔记录</span><span>本机保存 · 可导出备份</span></div></section>' +
+      (!state.records.length ? '<div class="card welcome-strip"><div><h2>从一笔往来开始</h2><p>已有账本可直接导入旧 JSON；办一场事，可在事由中连续记账。</p></div><div class="btn-row"><a class="btn" href="#/settings">导入旧账本</a>' + (!state.contacts.length && !state.events.length ? '<button class="btn" id="loadDemo">体验示例账本</button>' : '') + '</div></div>' : '') +
+      '<div class="metric-strip"><button data-act="home-records" data-preset="month" data-dir="in"><span>本月收到</span><strong class="c-in">¥ ' + money(month.inAmt) + '</strong><small>' + month.inCnt + ' 笔 · 查看明细</small></button><button data-act="home-records" data-preset="month" data-dir="out"><span>本月送出</span><strong class="c-out">¥ ' + money(month.outAmt) + '</strong><small>' + month.outCnt + ' 笔 · 查看明细</small></button><button data-act="contact-scope" data-scope="positive"><span>累计收多于送</span><strong>' + moreIn.length + '<small> 人</small></strong><small>往来差额供回礼参考</small></button><button data-act="event-scope" data-scope="upcoming"><span>近 60 天事由</span><strong>' + upcoming.length + '<small> 件</small></strong><small>提前安排，记住日子</small></button></div>' +
+      '<div class="workspace-grid"><section class="card"><div class="card-head"><h2>接下来要留意</h2><span class="section-kicker">行动清单</span></div>' +
+      (needBackup ? '<div class="task-row"><span class="task-dot amber"></span><div><b>给账本留一份备份</b><p>' + (backup ? '距离上次导出已超过 ' + days + ' 天' : '还没有导出过备份') + '，下载后请妥善保存。</p></div><button class="btn sm" data-act="backup">立即备份</button></div>' : '') +
+      (issues.length ? '<div class="task-row"><span class="task-dot amber"></span><div><b>' + issues.length + ' 笔记录需要核对</b><p>逐笔查看原因，修改后自动更新。</p></div><button class="btn sm" data-act="home-records" data-preset="issues">去核对</button></div>' : '') +
+      (unrecorded.length ? '<div class="task-row"><span class="task-dot"></span><div><b>' + unrecorded.length + ' 件已到日期的事由尚无记录</b><p>可以补记，也可以保留为空事由。</p></div><button class="btn sm" data-act="event-scope" data-scope="unrecorded">查看</button></div>' : '') +
+      (!needBackup && !issues.length && !unrecorded.length ? '<div class="empty"><b>当前没有待处理事项</b><p>新往来及时记，重要日子提前安排。</p></div>' : '') +
+      '<div class="panel-footer"><a href="#/stats">完整统计 →</a><a href="#/settings">备份与设置 →</a></div></section><section class="card"><div class="card-head"><h2>近期事由</h2><a href="#/events">全部事由 →</a></div>' +
+      (upcoming.length ? upcoming.slice(0, 5).map(e => '<div class="agenda-row"><div class="date-tile"><b>' + e.date.slice(8) + '</b><small>' + e.date.slice(5, 7) + ' 月</small></div><div><a class="title" href="' + linkTo('events', e.id) + '">' + esc(e.title) + '</a><p>' + esc(e.type || '未分类') + ' · ' + (e.isMine ? '我家办事' : '亲友办事') + '</p></div>' + statusTag(eventStatus(e)) + '</div>').join('') : '<div class="empty">未来 60 天没有安排。<p>新建事由后，日期会出现在这里。</p></div>') +
+      '</section></div><div class="workspace-grid"><section class="card"><div class="card-head"><h2>回礼参考</h2><a href="#/contacts">亲友往来 →</a></div><p class="section-note">截至今天，收多于送的亲友。差额不是债务，也不等于本次应送金额。</p>' +
+      (moreIn.slice(0, 5).map(x => '<div class="person-row"><span class="avatar">' + esc(String(x.c.name || '人').slice(0, 1)) + '</span><div><a class="title" href="' + linkTo('contacts', x.c.id) + '">' + esc(displayName(x.c)) + '</a><p>' + esc([x.c.unit, x.c.relation].filter(Boolean).join(' · ') || '亲友') + ' · 最近 ' + esc(x.last?.date || '—') + '</p></div><b class="c-in">收多 ' + money(x.bal) + '</b></div>').join('') || '<div class="empty">暂无收多于送的亲友</div>') +
+      '</section><section class="card"><div class="card-head"><h2>最近记下的往来</h2><a href="#/records">全部流水 →</a></div>' +
+      (recent.map(r => '<div class="person-row"><span class="direction-dot ' + (r.direction === 'in' ? 'in' : 'out') + '">' + (r.direction === 'in' ? '收' : r.direction === 'out' ? '送' : '?') + '</span><div><b>' + esc(displayName(contactById(r.contactId))) + '</b><p>' + esc(eventLabel(eventById(r.eventId))) + ' · ' + esc(r.date) + '</p></div><button class="amount-link ' + (r.direction === 'in' ? 'c-in' : 'c-out') + '" data-act="edit-record" data-id="' + esc(r.id) + '" aria-label="编辑记录">' + (r.direction === 'in' ? '+' : '−') + money(r.amount) + '</button></div>').join('') || '<div class="empty">保存第一笔后，会在这里看到它。</div>') + '</section></div>';
   }
 
   /* ========== 页面：记录 ========== */
-  const recFilter = { q: '', dir: '', eventId: '', unit: '', from: '', to: '', min: '', max: '', sortKey: 'date', sortDir: 'desc' };
+  const recFilter = { q: '', dir: '', contactId: '', eventId: '', unit: '', from: '', to: '', min: '', max: '', issue: '', sortKey: 'date', sortDir: 'desc' };
+  let recordPage = 1;
   function filteredRecords() {
     const q = recFilter.q.toLowerCase();
+    const issueMap = new Map(FZAnalytics.audit(state, today()).map(x => [x.record.id, x.reasons]));
     let recs = state.records.filter(r => {
       const c = contactById(r.contactId), ev = eventById(r.eventId);
+      if (recFilter.issue && (!issueMap.has(r.id) || (recFilter.issue !== 'all' && !issueMap.get(r.id).includes(recFilter.issue)))) return false;
+      if (recFilter.contactId && String(r.contactId) !== String(recFilter.contactId)) return false;
       if (recFilter.dir && r.direction !== recFilter.dir) return false;
-      if (recFilter.eventId && r.eventId !== recFilter.eventId) return false;
+      if (recFilter.eventId && String(r.eventId) !== String(recFilter.eventId)) return false;
       if (recFilter.unit && (c?.unit || '') !== recFilter.unit) return false;
       if (recFilter.from && r.date < recFilter.from) return false;
       if (recFilter.to && r.date > recFilter.to) return false;
@@ -746,17 +784,20 @@
       return true;
     });
     const k = recFilter.sortKey, dirMul = recFilter.sortDir === 'asc' ? 1 : -1;
-    const keyOf = r => k === 'amount' ? r.amount : k === 'contact' ? (contactById(r.contactId)?.name || '') : k === 'event' ? (eventById(r.eventId)?.title || '') : k === 'unit' ? (contactById(r.contactId)?.unit || '') : k === 'dir' ? r.direction : k === 'method' ? (r.method || '') : r.date;
+    const keyOf = r => k === 'amount' ? Number(r.amount) || 0 : k === 'contact' ? (contactById(r.contactId)?.name || '') : k === 'event' ? (eventById(r.eventId)?.title || '') : k === 'unit' ? (contactById(r.contactId)?.unit || '') : k === 'dir' ? r.direction : k === 'method' ? (r.method || '') : r.date;
     recs.sort((a, b) => { const x = keyOf(a), y = keyOf(b); const c = typeof x === 'number' ? x - y : String(x).localeCompare(String(y), 'zh'); return c ? c * dirMul : byDateDesc(a, b); });
     return recs;
   }
   function pageRecords() {
     const recs = filteredRecords();
-    const t = totals(recs);
+    const t = FZAnalytics.summarize(recs);
+    const pages = Math.max(1, Math.ceil(recs.length / 50)); recordPage = Math.min(recordPage, pages);
+    const issues = new Map(FZAnalytics.audit(state, today()).map(x => [x.record.id, x.reasons]));
     const units = [...new Set(state.contacts.map(c => c.unit).filter(Boolean))].sort();
     const issueCount = FZAnalytics.audit(state, today()).length;
     return `
-      ${issueCount ? `<div class="notice record-quality">⚠️ 有 <b>${issueCount}</b> 条记录需要核对（日期、金额、方向或关联关系），统计页可查看原因。<a href="#/stats">去统计核对 →</a></div>` : ''}
+      ${moduleHead('每一笔，都找得到', '按人、按事、按日期查账；筛选结果可完整导出。', '<button class="btn" data-act="voice-add">批量录入</button><button class="btn primary" data-act="add-record">＋ 记一笔</button>')}
+      <div class="filter-shortcuts no-print">${[['all','全部流水'],['month','本月'],['year','本年'],['issues','待核对 ' + issueCount]].map(([key,label]) => `<button class="btn sm" data-act="record-preset" data-preset="${key}">${label}</button>`).join('')}</div>
       <div class="card">
         <div class="card-head"><h2>全部记录 <span class="c-muted" style="font-size:13px;font-weight:400">共 ${recs.length} 条 · 收 <span class="c-in">${money(t.inAmt)}</span> · 送 <span class="c-out">${money(t.outAmt)}</span></span></h2>
           <div class="btn-row"><button class="btn sm" id="exportFiltered">导出当前结果 CSV</button><button class="btn sm" data-act="voice-add">🎤 语音批量</button><button class="btn primary sm" data-act="add-record">＋ 记一笔</button></div></div>
@@ -765,30 +806,40 @@
           <div class="field"><label>方向</label><select name="dir">${options([{ value: '', label: '全部' }, { value: 'in', label: '收' }, { value: 'out', label: '送' }], recFilter.dir)}</select></div>
           <div class="field" style="min-width:180px"><label>事由</label><select name="eventId">${options(state.events.slice().sort(byDateDesc).map(e => ({ value: e.id, label: e.title })), recFilter.eventId, '全部')}</select></div>
           <div class="field"><label>单位</label><select name="unit">${options(units, recFilter.unit, '全部')}</select></div>
+          <div class="field"><label>联系人</label><select name="contactId">${options(state.contacts.map(c => ({value:c.id,label:displayName(c)})), recFilter.contactId, '全部')}</select></div>
+          <div class="field"><label>核对范围</label><select name="issue">${options([{value:'',label:'全部记录'},{value:'all',label:'所有待核对'},...['日期无效','金额无效','方向无效','联系人未关联','事由未关联','未来日期','疑似重复'].map(x => ({value:x,label:x}))], recFilter.issue)}</select></div>
           <div class="field"><label>从</label><input type="date" name="from" value="${recFilter.from}"></div>
           <div class="field"><label>到</label><input type="date" name="to" value="${recFilter.to}"></div>
           <div class="field" style="min-width:90px"><label>金额≥</label><input type="number" name="min" value="${recFilter.min}"></div>
           <div class="field" style="min-width:90px"><label>金额≤</label><input type="number" name="max" value="${recFilter.max}"></div>
           <button class="btn" id="resetFilter">重置</button>
         </div>
-        ${recordsTable(recs, { sortable: true, sortKey: recFilter.sortKey, sortDir: recFilter.sortDir })}
+        ${(recFilter.from && recFilter.to && recFilter.from > recFilter.to) || (recFilter.min !== '' && recFilter.max !== '' && Number(recFilter.min) > Number(recFilter.max)) ? '<p role="alert" class="c-danger">起始值不能大于结束值，请调整筛选范围。</p>' : ''}
+        <div class="result-summary" aria-live="polite">匹配 ${recs.length} 笔 · 收 ¥${money(t.inAmt)} · 送 ¥${money(t.outAmt)} · 差额 ¥${money(t.net)}<span>汇总与导出包含全部匹配记录</span></div>
+        ${recs.length ? recordsTable(recs.slice((recordPage-1)*50, recordPage*50), { sortable: true, sortKey: recFilter.sortKey, sortDir: recFilter.sortDir, issues }) : '<div class="empty">没有符合当前条件的记录。<p>试试重置筛选，或记下第一笔往来。</p></div>'}
+        <div class="pager no-print"><span>第 ${recordPage} / ${pages} 页 · 每页 50 笔</span><button class="btn sm" data-act="record-page" data-page="${recordPage-1}" ${recordPage<=1?'disabled':''}>上一页</button><button class="btn sm" data-act="record-page" data-page="${recordPage+1}" ${recordPage>=pages?'disabled':''}>下一页</button></div>
       </div>`;
   }
 
   /* ========== 页面：事由 ========== */
+  const eventView = { q: '', scope: 'all', mine: '' };
   function pageEvents() {
-    const evs = state.events.slice().sort(byDateDesc);
-    const groups = groupBy(evs, e => (e.date || '').slice(0, 4) || '未知');
-    return `<div class="card">
-      <div class="card-head"><h2>事由列表 <span class="c-muted" style="font-size:13px;font-weight:400">${evs.length} 件</span></h2><button class="btn primary sm" data-act="add-event">＋ 新增事由</button></div>
-      ${evs.length ? [...groups.entries()].map(([y, list]) => {
-        const t = totals(state.records.filter(r => list.some(e => e.id === r.eventId)));
-        return `<div class="group-head" data-act="toggle" data-target="y${y}"><span>${y} 年 <span class="meta">${list.length} 件</span></span><span class="meta">收 <span class="c-in">${money(t.inAmt)}</span> · 送 <span class="c-out">${money(t.outAmt)}</span></span></div>
-        <div data-group="y${y}"><div class="table-wrap"><table><thead><tr><th>日期</th><th>事由</th><th>类型</th><th>主办</th><th class="num">笔数</th><th class="num">收到</th><th class="num">送出</th><th></th></tr></thead><tbody>
-        ${list.map(e => { const tt = totals(recordsOf({ eventId: e.id })); const h = contactById(e.host); return `<tr><td>${e.date}</td><td><a href="#/events/${e.id}"><b>${esc(e.title)}</b></a> ${e.isMine ? '<span class="tag mine">我家</span>' : ''}</td><td>${esc(e.type)}</td><td>${h ? `<a href="#/contacts/${h.id}">${esc(displayName(h))}</a>` : '—'}</td><td class="num">${tt.count}</td><td class="num c-in">${tt.inAmt ? money(tt.inAmt) : '—'}</td><td class="num c-out">${tt.outAmt ? money(tt.outAmt) : '—'}</td><td><button class="btn link sm" data-act="edit-event" data-id="${e.id}">编辑</button></td></tr>`; }).join('')}
-        </tbody></table></div></div>`;
-      }).join('') : '<div class="empty">还没有事由，点击右上角新增。<br>事由是一次具体的事情，例如「张三儿子婚礼」「我家乔迁」，每笔记录都挂在某个事由下。</div>'}
-    </div>`;
+    const q = eventView.q.trim().toLowerCase();
+    const evs = state.events.filter(e => {
+      if (q && ![e.title,e.place,e.type,contactById(e.host)?.name,e.note].join(' ').toLowerCase().includes(q)) return false;
+      if (eventView.mine && Boolean(e.isMine) !== (eventView.mine === 'mine')) return false;
+      const status = eventStatus(e);
+      return eventView.scope === 'all' || (eventView.scope === 'upcoming' ? e.date >= today() && daysBetween(today(), e.date) <= 60 : status.key === eventView.scope);
+    }).sort(eventView.scope === 'upcoming' ? byDateAsc : byDateDesc);
+    return moduleHead('把一场事，记成一本礼簿', '提前安排日子，现场连续录入，事后核对名单。', '<button class="btn primary" data-act="add-event">＋ 新建事由</button>') +
+      '<section class="card"><div class="module-controls"><label>搜索<input id="eq" value="' + esc(eventView.q) + '" placeholder="事由 / 主办人 / 地点"></label><label>状态<select id="eventScope">' +
+      options([{value:'all',label:'全部事由'},{value:'upcoming',label:'近 60 天'},{value:'unrecorded',label:'到期未记账'},{value:'recorded',label:'名单待核对'},{value:'reviewed',label:'名单已核对'},{value:'undated',label:'日期待核对'}],eventView.scope) +
+      '</select></label><label>谁的事<select id="eventMine">' + options([{value:'',label:'全部'},{value:'mine',label:'我家办事'},{value:'other',label:'亲友办事'}],eventView.mine) +
+      '</select></label></div><div class="result-summary" aria-live="polite">找到 ' + evs.length + ' 件 / 共 ' + state.events.length + ' 件事由</div></section>' +
+      (evs.length ? '<div class="event-grid">' + evs.map(e => {
+        const rs = recordsOf({eventId:e.id}), t = FZAnalytics.summarize(rs), host = contactById(e.host), status = eventStatus(e);
+        return '<article class="card event-card"><div class="card-head"><span class="section-kicker">' + esc(e.date || '未填日期') + '</span>' + statusTag(status) + '</div><h2><a href="' + linkTo('events',e.id) + '">' + esc(e.title) + '</a></h2><p class="section-note">' + esc(e.type || '未分类') + ' · ' + (e.isMine ? '我家办事' : '亲友办事') + (host ? ' · '+esc(displayName(host)) : '') + '</p><p class="event-place">' + esc(e.place || '地点未填写') + '</p><div class="event-totals"><div><span>收到</span><b class="c-in">¥ '+money(t.inAmt)+'</b></div><div><span>送出</span><b class="c-out">¥ '+money(t.outAmt)+'</b></div><div><span>参与亲友</span><b>'+new Set(rs.map(r=>r.contactId)).size+' 人</b></div></div><div class="panel-footer"><a href="'+linkTo('events',e.id)+'">名单与核对 →</a><button class="btn sm" data-act="voice-add" data-event="'+esc(e.id)+'">批量</button><button class="btn primary sm" data-act="add-record" data-event="'+esc(e.id)+'">记一笔</button></div></article>';
+      }).join('') + '</div>' : '<div class="card empty">没有符合当前条件的事由。<p>新建事由，或切换状态查看其他礼簿。</p></div>');
   }
   function pageEventDetail(id) {
     const e = eventById(id);
@@ -797,7 +848,8 @@
     const t = totals(recs);
     const host = contactById(e.host);
     const main = e.isMine ? recs.filter(r => r.direction === 'in') : recs.filter(r => r.direction === 'out');
-    const avg = main.length ? sum(main.map(r => r.amount)) / main.length : 0;
+    const participantCount = new Set(main.map(r => r.contactId)).size;
+    const avg = participantCount ? sum(main.map(r => r.amount)) / participantCount : 0;
     const byUnit = [...groupBy(recs, r => contactById(r.contactId)?.unit || '（未填单位）').entries()].map(([u, rs]) => ({ u, t: totals(rs), depts: [...groupBy(rs, r => contactById(r.contactId)?.dept || '（未填科室）').entries()].map(([d, drs]) => ({ d, t: totals(drs) })) })).sort((a, b) => (b.t.inAmt + b.t.outAmt) - (a.t.inAmt + a.t.outAmt));
     const byMethod = [...groupBy(recs, r => r.method || '未填').entries()].map(([m, rs]) => `${m} ${rs.length} 笔 ${money(sum(rs.map(r => r.amount)))} 元`).join('；');
     // 回礼对照：这次收到礼的人，之前我给过他多少
@@ -807,7 +859,8 @@
       <div class="page-title"><h1>${esc(e.title)}</h1>${e.isMine ? '<span class="tag mine">我家办事</span>' : ''}<span class="tag">${esc(e.type)}</span><span class="meta">${e.date}${e.place ? ' · ' + esc(e.place) : ''}${host ? ` · 主办：<a href="#/contacts/${host.id}">${esc(displayName(host))}</a>` : ''}</span>
         <div class="btn-row no-print" style="margin-left:auto"><button class="btn sm" data-act="edit-event" data-id="${e.id}">编辑</button><button class="btn sm" data-act="export-event-csv" data-id="${e.id}">导出名单 CSV</button><button class="btn sm" data-act="print">打印</button><button class="btn sm" data-act="voice-add" data-event="${e.id}">🎤 语音批量</button><button class="btn primary sm" data-act="add-record" data-event="${e.id}">＋ 添加记录</button></div></div>
       ${e.note ? `<p class="c-muted">${esc(e.note)}</p>` : ''}
-      ${statCards(t, { netSub: '本事由', cnt: '人均', cntSub: `${e.isMine ? '收礼' : '送礼'} ${main.length} 笔` }).replace(`<div class="value">${t.count}</div>`, `<div class="value">${money(Math.round(avg))}</div>`)}
+      <div class="card event-workbench"><div><h2>这场事的记账台 ${statusTag(eventStatus(e))}</h2><p>连续录入沿用事由与金额；核对名单后可标记完成。明细改变会自动转回待核对。</p></div><div class="btn-row"><button class="btn primary" data-act="add-record" data-event="${esc(e.id)}">连续记账</button><button class="btn" data-act="review-event" data-id="${esc(e.id)}" ${!recs.length || e.date>today() ? 'disabled' : ''}>${eventStatus(e).key==='reviewed'?'重新核对':'标记名单已核对'}</button></div></div>
+      ${statCards(t, { netSub: '本事由', cnt: '每人平均', cntSub: `${e.isMine ? '收礼' : '送礼'} ${participantCount} 人 · ${main.length} 笔`, countValue: money(avg) })}
       <div class="grid grid-2" style="margin-top:16px">
         <div class="card"><h2>按单位 / 科室</h2>
           ${byUnit.length ? byUnit.map(g => `<div class="list-item" style="flex-wrap:wrap"><div><b>${esc(g.u)}</b> <span class="meta">${g.t.count} 笔</span>
@@ -830,38 +883,25 @@
   }
 
   /* ========== 页面：人员 ========== */
-  let contactView = { q: '', mode: 'group' };
+  let contactView = { q: '', mode: 'group', balance: 'all' };
   function pageContacts() {
-    const q = contactView.q.toLowerCase();
-    const list = state.contacts.filter(c => !q || `${c.name} ${c.unit || ''} ${c.dept || ''} ${c.relation || ''}`.toLowerCase().includes(q)).map(c => ({ c, t: totals(recordsOf({ contactId: c.id })), bal: balanceOf(c.id) }));
-    const row = x => `<tr><td><a href="#/contacts/${x.c.id}"><b>${esc(x.c.name)}</b></a></td><td class="c-muted">${esc(x.c.relation || '')}</td>${contactView.mode === 'group' ? '' : `<td class="c-muted">${esc([x.c.unit, x.c.dept].filter(Boolean).join(' / ') || '—')}</td>`}<td class="num">${x.t.count}</td><td class="num c-in">${x.t.inAmt ? money(x.t.inAmt) : '—'}</td><td class="num c-out">${x.t.outAmt ? money(x.t.outAmt) : '—'}</td><td class="num ${x.bal > 0 ? 'c-in' : x.bal < 0 ? 'c-out' : 'c-muted'}">${x.bal > 0 ? '欠他 ' + money(x.bal) : x.bal < 0 ? '他欠 ' + money(-x.bal) : '平'}</td><td><button class="btn link sm" data-act="edit-contact" data-id="${x.c.id}">编辑</button></td></tr>`;
-    const head = `<thead><tr><th>姓名</th><th>关系</th>${contactView.mode === 'group' ? '' : '<th>单位 / 科室</th>'}<th class="num">笔数</th><th class="num">他给我</th><th class="num">我给他</th><th class="num">人情差额</th><th></th></tr></thead>`;
-    let body;
-    if (contactView.mode === 'group') {
-      const units = [...groupBy(list, x => x.c.unit || '（未填单位）').entries()].sort((a, b) => b[1].length - a[1].length);
-      body = units.map(([u, xs]) => {
-        const depts = [...groupBy(xs, x => x.c.dept || '（未填科室）').entries()].sort((a, b) => b[1].length - a[1].length);
-        const tt = { inAmt: sum(xs.map(x => x.t.inAmt)), outAmt: sum(xs.map(x => x.t.outAmt)) };
-        return `<div class="group-head" data-act="toggle" data-target="u${esc(u)}"><span>${esc(u)} <span class="meta">${xs.length} 人</span></span><span class="meta">收 <span class="c-in">${money(tt.inAmt)}</span> · 送 <span class="c-out">${money(tt.outAmt)}</span></span></div>
-          <div data-group="u${esc(u)}">${depts.map(([d, ds]) => `<div style="padding:6px 10px 0" class="c-muted"><b>${esc(d)}</b> · ${ds.length} 人</div><div class="table-wrap"><table>${head}<tbody>${ds.sort((a, b) => a.c.name.localeCompare(b.c.name, 'zh')).map(row).join('')}</tbody></table></div>`).join('')}</div>`;
-      }).join('');
-    } else {
-      list.sort((a, b) => (b.t.inAmt + b.t.outAmt) - (a.t.inAmt + a.t.outAmt));
-      body = `<div class="table-wrap"><table>${head}<tbody>${list.map(row).join('')}</tbody></table></div>`;
-    }
-    return `<div class="card">
-      <div class="card-head"><h2>人员 <span class="c-muted" style="font-size:13px;font-weight:400">${state.contacts.length} 人</span></h2>
-        <div class="btn-row"><input id="cq" placeholder="搜索姓名 / 单位 / 科室" value="${esc(contactView.q)}" style="padding:6px 10px;border:1px solid var(--border);border-radius:8px">
-          <select id="cmode" style="padding:6px;border:1px solid var(--border);border-radius:8px">${options([{ value: 'group', label: '按单位/科室分组' }, { value: 'list', label: '按往来金额列表' }], contactView.mode)}</select>
-          <button class="btn primary sm" data-act="add-contact">＋ 新增联系人</button></div></div>
-      ${list.length ? body : '<div class="empty">暂无联系人</div>'}
-    </div>`;
+    const q = contactView.q.trim().toLowerCase(), all = contactSummaries();
+    const list = all.filter(x => (!q || [x.c.name,x.c.unit,x.c.dept,x.c.relation,x.c.phone,x.c.note].join(' ').toLowerCase().includes(q)) &&
+      (contactView.balance === 'all' || (contactView.balance === 'positive' ? x.bal > 0 : contactView.balance === 'negative' ? x.bal < 0 : contactView.balance === 'none' ? !x.t.count : x.t.count > 0 && x.bal === 0)));
+    const row = x => '<tr><td><a class="title" href="'+linkTo('contacts',x.c.id)+'">'+esc(x.c.name)+'</a><small class="cell-sub">'+esc([x.c.unit,x.c.dept,x.c.relation].filter(Boolean).join(' · ') || '未填写关系')+'</small></td><td class="num c-in">'+money(x.t.inAmt)+'</td><td class="num c-out">'+money(x.t.outAmt)+'</td><td class="num">'+(x.bal > 0 ? '收多 '+money(x.bal) : x.bal < 0 ? '送多 '+money(-x.bal) : x.t.count ? '收送持平' : '暂无往来')+'</td><td>'+esc(x.last?.date || '—')+'<small class="cell-sub">'+x.t.count+' 笔</small></td><td><button class="btn sm" data-act="add-record" data-contact="'+esc(x.c.id)+'">记一笔</button> <button class="btn link sm" data-act="edit-contact" data-id="'+esc(x.c.id)+'">编辑</button></td></tr>';
+    const table = rows => '<div class="table-wrap"><table><thead><tr><th>亲友 / 单位</th><th class="num">累计收到</th><th class="num">累计送出</th><th class="num">往来差额</th><th>最近往来</th><th class="no-print">操作</th></tr></thead><tbody>'+rows.map(row).join('')+'</tbody></table></div>';
+    list.sort((a,b) => contactView.mode === 'recent' ? byDateDesc(a.last || {}, b.last || {}) : contactView.mode === 'balance' ? Math.abs(b.bal)-Math.abs(a.bal) : b.t.gross-a.t.gross || String(a.c.name).localeCompare(String(b.c.name),'zh'));
+    const body = contactView.mode === 'group' ? [...groupBy(list,x=>x.c.unit || '未填单位')].map(([unit,rows]) => '<details class="contact-group" open><summary>'+esc(unit)+' <span>'+rows.length+' 人</span></summary>'+table(rows)+'</details>').join('') : table(list);
+    return moduleHead('往来有记录，回礼有参考', '截至今天的有效往来。差额仅作参考，不代表债务或必须回礼。','<button class="btn primary" data-act="add-contact">＋ 新增亲友</button>') +
+      '<div class="filter-shortcuts no-print">'+[['all','全部亲友',all.length],['positive','收多于送',all.filter(x=>x.bal>0).length],['negative','送多于收',all.filter(x=>x.bal<0).length],['balanced','收送持平',all.filter(x=>x.t.count && x.bal===0).length],['none','尚无往来',all.filter(x=>!x.t.count).length]].map(([key,label,n])=>'<button class="btn sm '+(contactView.balance===key?'selected':'')+'" data-act="contact-scope" data-scope="'+key+'" aria-pressed="'+(contactView.balance===key)+'">'+label+' '+n+'</button>').join('')+'</div><section class="card"><div class="module-controls"><label>找亲友<input id="cq" value="'+esc(contactView.q)+'" placeholder="姓名 / 单位 / 电话 / 备注"></label><label>查看方式<select id="cmode">'+options([{value:'group',label:'按单位分组'},{value:'list',label:'往来金额最多'},{value:'recent',label:'最近往来优先'},{value:'balance',label:'往来差额最大'}],contactView.mode)+'</select></label></div><div class="result-summary" aria-live="polite">找到 '+list.length+' 位亲友<span>点击姓名查看完整时间线</span></div>'+(list.length ? body : '<div class="empty">没有符合条件的亲友。<p>可以更换关键词或查看全部亲友。</p></div>')+'</section>';
   }
   function pageContactDetail(id) {
     const c = contactById(id);
     if (!c) return '<div class="card"><div class="empty">联系人不存在</div></div>';
     const recs = recordsOf({ contactId: id }).sort(byDateDesc);
-    const t = totals(recs);
+    const eligible = recs.filter(r => FZAnalytics.validRecord(r) && r.date <= today());
+    const t = FZAnalytics.summarize(eligible);
+    const lastIn = eligible.find(r => r.direction === 'in'), lastOut = eligible.find(r => r.direction === 'out');
     const bal = t.inAmt - t.outAmt;
     const first = recs[recs.length - 1], last = recs[0];
     const hosted = state.events.filter(e => e.host === id).sort(byDateDesc);
@@ -874,10 +914,11 @@
       <div class="grid grid-4">
         <div class="stat"><div class="label">他给我</div><div class="value c-in">${money(t.inAmt)}</div><div class="sub">${t.inCnt} 笔</div></div>
         <div class="stat"><div class="label">我给他</div><div class="value c-out">${money(t.outAmt)}</div><div class="sub">${t.outCnt} 笔</div></div>
-        <div class="stat"><div class="label">人情差额</div><div class="value ${bal > 0 ? 'c-in' : bal < 0 ? 'c-out' : ''}">${bal > 0 ? '我欠 ' : bal < 0 ? '他欠 ' : ''}${money(Math.abs(bal))}</div><div class="sub">${bal > 0 ? '应回礼' : bal < 0 ? '对方尚未回礼' : '两清'}</div></div>
+        <div class="stat"><div class="label">往来差额</div><div class="value ${bal > 0 ? 'c-in' : bal < 0 ? 'c-out' : ''}">${bal > 0 ? '收多 ' : bal < 0 ? '送多 ' : ''}${money(Math.abs(bal))}</div><div class="sub">截至今天 · 仅供回礼参考</div></div>
         <div class="stat"><div class="label">往来时间</div><div class="value" style="font-size:16px">${first ? `${first.date}<br>至 ${last.date}` : '—'}</div><div class="sub">${recs.length} 笔往来${first && last ? `，${Math.floor(daysBetween(first.date, today()) / 365)} 年` : ''}</div></div>
       </div>
       <div class="grid grid-2" style="margin-top:16px">
+        <section class="card" style="grid-column:1/-1"><div class="card-head"><h2>下次见面前，先看这几笔</h2><button class="btn sm" data-act="person-records" data-id="${esc(c.id)}">筛选全部流水</button></div><div class="reference-grid"><div><span>最近对方给我</span><strong>${lastIn ? '¥ ' + money(lastIn.amount) : '暂无记录'}</strong><small>${lastIn ? esc(lastIn.date) + ' · ' + esc(eventLabel(eventById(lastIn.eventId))) : '有记录后会显示在这里'}</small></div><div><span>最近我给对方</span><strong>${lastOut ? '¥ ' + money(lastOut.amount) : '暂无记录'}</strong><small>${lastOut ? esc(lastOut.date) + ' · ' + esc(eventLabel(eventById(lastOut.eventId))) : '有记录后会显示在这里'}</small></div><div><span>回礼参考</span><strong>${lastIn && Number(state.settings.returnRatio)>0 ? '¥ '+money(Math.round(Number(lastIn.amount)*Number(state.settings.returnRatio)*100)/100) : '按实际情况决定'}</strong><small>最近收到金额 × 设置系数；不自动记入账本</small></div></div></section>
         <div class="card" style="grid-column:1/-1"><h2>完整时间线</h2>
           ${recs.length ? [...years.entries()].map(([y, rs]) => { const yt = totals(rs); return `<div class="tl-year">${y} 年 <span style="font-weight:400;font-size:13px">收 <span class="c-in">${money(yt.inAmt)}</span> · 送 <span class="c-out">${money(yt.outAmt)}</span></span></div><div class="timeline">${rs.map(r => { const ev = eventById(r.eventId); return `<div class="tl-item ${r.direction}"><div class="tl-date">${r.date}</div><div class="tl-body"><div><span class="tag ${r.direction}">${r.direction === 'in' ? '他给我' : '我给他'}</span> <a href="#/events/${r.eventId}"><b>${esc(eventLabel(ev))}</b></a> <span class="c-muted">${esc(ev?.type || '')}${r.method ? ' · ' + esc(r.method) : ''}${r.note ? ' · ' + esc(r.note) : ''}</span></div><div class="btn-row"><span class="amt ${r.direction === 'in' ? 'c-in' : 'c-out'}">${r.direction === 'in' ? '+' : '-'}${money(r.amount)}</span><button class="btn link sm no-print" data-act="edit-record" data-id="${r.id}">编辑</button></div></div></div>`; }).join('')}</div>`; }).join('') : '<div class="empty">还没有往来记录</div>'}
         </div>
@@ -943,7 +984,10 @@
   /* ========== 页面：设置 ========== */
   function pageSettings() {
     const s = state.settings;
+    const check = FZAnalytics.audit(state, today()), recovery = getRecovery();
     return `
+      ${moduleHead('账本在自己手里', '查看数据状况、下载备份、预览导入；原有 JSON 可继续使用。')}
+      <section class="card safety-panel"><div><span class="section-kicker">数据与恢复</span><h2>${state.records.length} 笔往来，${state.contacts.length} 位亲友</h2><p>仅保存在当前浏览器；手机和电脑需通过 JSON 备份迁移，尚未自动同步。</p></div><div class="btn-row"><button class="btn" data-act="home-records" data-preset="issues">核对 ${check.length} 笔提示</button>${recovery ? '<button class="btn" id="restoreRecovery">恢复导入前的账本</button>' : ''}</div>${recovery ? `<p class="section-note">保留最近一次导入前的本机恢复点：${new Date(recovery.savedAt).toLocaleString('zh-CN')}。恢复会先保存当前版本，可再次切换。</p>` : '<p class="section-note">每次合并或覆盖导入前，自动保留一个本机恢复点。恢复点与本站数据一起清理，不能代替下载备份。</p>'}</section>
       ${installCard()}
       <div class="grid grid-2">
         <div class="card"><h2>数据备份</h2>
@@ -967,7 +1011,7 @@
         </div>
         <div class="card"><h2>其他</h2>
           <div class="btn-row"><button class="btn" id="loadDemo">载入示例数据</button><button class="btn danger" id="clearAll">清空全部数据</button></div>
-          <p class="c-muted" style="font-size:13px;margin-top:12px">示例数据用于体验，会与现有数据合并，可随时清空。<br>版本 1.0 · 纯本地运行，无网络请求。</p>
+          <p class="c-muted" style="font-size:13px;margin-top:12px">示例数据用于体验，会与现有数据合并。<br>版本 1.3 · 本地账本 · 支持离线</p>
         </div>
       </div>`;
   }
@@ -994,22 +1038,43 @@
     download(`份子钱备份_${today()}.json`, JSON.stringify(state, null, 2), 'application/json');
     toast('备份已导出'); render();
   }
+  const RECOVERY_KEY = 'fzq_recovery_v1';
+  function getRecovery() {
+    try { const r = JSON.parse(localStorage.getItem(RECOVERY_KEY)); return r?.data ? r : null; } catch { return null; }
+  }
+  function installData(next, message) {
+    const previous = state;
+    try {
+      // 先写恢复点，再原子替换主数据；任何存储失败均不切换内存账本。
+      localStorage.setItem(RECOVERY_KEY, JSON.stringify({ savedAt: Date.now(), data: previous }));
+      next = { ...next, meta: { ...next.meta, updatedAt: Date.now() } };
+      localStorage.setItem(KEY, JSON.stringify(next));
+      state = next; closeModal(); render(); toast(message);
+    } catch (e) { toast('未更新账本：本机存储空间不足或不可写，请先导出备份。', true); }
+  }
+  function restoreRecovery() {
+    const saved = getRecovery(); if (!saved) return;
+    let next; try { next = normalizeData(saved.data); } catch (e) { return toast('恢复点格式异常，当前账本未改变', true); }
+    confirmDialog('恢复到 ' + esc(new Date(saved.savedAt).toLocaleString('zh-CN')) + ' 的账本？包含 ' + next.records.length + ' 笔记录。当前账本将保留为新的恢复点。', () => installData(next, '已恢复，可在设置中切回上一版本'), '恢复账本');
+  }
   function importJson(file) {
     const reader = new FileReader();
+    reader.onerror = () => toast('文件读取失败，请重新选择', true);
     reader.onload = () => {
       let d;
-      try { d = JSON.parse(reader.result); if (!Array.isArray(d.records) || !Array.isArray(d.contacts)) throw 0; d = normalizeData(d); } catch { return toast('文件格式不正确', true); }
-      const m = openModal(`<h2>导入备份</h2>
-        <p>文件包含：<b>${d.contacts.length}</b> 位联系人，<b>${(d.events || []).length}</b> 个事由，<b>${d.records.length}</b> 条记录。</p>
-        <p>当前已有：${state.contacts.length} 位联系人，${state.events.length} 个事由，${state.records.length} 条记录。</p>
-        <div class="actions"><button class="btn" data-cancel>取消</button><button class="btn" data-merge>合并（按 ID 去重）</button><button class="btn danger" data-replace>覆盖现有数据</button></div>`);
-      $('[data-cancel]', m).onclick = closeModal;
-      $('[data-replace]', m).onclick = () => { state = normalizeData(d); save(); closeModal(); toast('已覆盖导入'); render(); };
-      $('[data-merge]', m).onclick = () => {
-        const merge = (a, b) => { const ids = new Set(a.map(x => x.id)); return a.concat(b.filter(x => !ids.has(x.id))); };
-        state.contacts = merge(state.contacts, d.contacts); state.events = merge(state.events, d.events || []); state.records = merge(state.records, d.records);
-        save(); closeModal(); toast('已合并导入'); render();
-      };
+      try {
+        const raw = JSON.parse(reader.result);
+        if (!Array.isArray(raw.contacts) || !Array.isArray(raw.records)) throw new Error('备份需要包含联系人与记录数组');
+        d = normalizeData(raw);
+      } catch (e) { return toast('未导入：' + e.message, true); }
+      const preview = FZAnalytics.mergePreview(state, d), check = FZAnalytics.audit(d, today());
+      const conflicts = Object.values(preview.counts).reduce((n,c) => n+c.conflicts,0);
+      const m = openModal('<h2>先看看这份账本</h2><p class="section-note">' + esc(file.name) + ' · 旧版 JSON 可直接使用</p><div class="table-wrap"><table><thead><tr><th>内容</th><th class="num">文件内</th><th class="num">合并新增</th><th class="num">同 ID 内容不同</th></tr></thead><tbody>' +
+        [['contacts','亲友'],['events','事由'],['records','流水']].map(([k,label]) => '<tr><td>'+label+'</td><td class="num">'+d[k].length+'</td><td class="num">'+preview.counts[k].added+'</td><td class="num">'+preview.counts[k].conflicts+'</td></tr>').join('') +
+        '</tbody></table></div><p>'+(check.length ? '文件内有 '+check.length+' 笔核对提示，导入后可逐笔检查。' : '未发现日期、金额和关联异常。')+'</p><p class="section-note">合并按 ID 去重，同 ID 保留当前内容'+(conflicts ? '（'+conflicts+' 项不同）' : '')+'；覆盖则使用文件中的完整账本。两种方式均先保存导入前恢复点。</p><div class="actions"><button class="btn" data-cancel>取消</button><button class="btn" data-replace>覆盖当前账本</button><button class="btn primary" data-merge>合并新增内容</button></div>');
+      $('[data-cancel]',m).onclick = closeModal;
+      $('[data-merge]',m).onclick = () => installData(preview.result, '已合并，旧记录保留');
+      $('[data-replace]',m).onclick = () => confirmDialog('将当前 ' + state.records.length + ' 笔记录替换为文件中的 ' + d.records.length + ' 笔记录？导入前账本会保留为本机恢复点。', () => installData(d, '已覆盖导入，原账本可恢复'), '确认覆盖');
     };
     reader.readAsText(file);
   }
@@ -1040,72 +1105,58 @@
     save(); toast('示例数据已载入'); location.hash = '#/home'; render();
   }
 
+  /* 搜索统一保留中文组合输入、光标和滚动位置；离开页面取消旧定时器。 */
+  let viewTimer;
+  function bindSearch(input, update) {
+    if (!input) return;
+    let composing = false;
+    const schedule = e => {
+      clearTimeout(viewTimer);
+      if (composing || e?.isComposing) return;
+      update(input.value);
+      viewTimer = setTimeout(() => {
+        if (composing || !input.isConnected) return;
+        const focused = document.activeElement === input, start = input.selectionStart, end = input.selectionEnd, scroll = window.scrollY;
+        const selector = input.id ? '#' + input.id : '#filters [name="' + input.name + '"]';
+        render();
+        const next = $(selector);
+        if (focused && next) { next.focus({ preventScroll: true }); if (next.type === 'text' || next.type === 'search') next.setSelectionRange(start, end); }
+        window.scrollTo(0, scroll);
+      }, 280);
+    };
+    input.addEventListener('compositionstart', () => { composing = true; clearTimeout(viewTimer); });
+    input.addEventListener('compositionend', () => { composing = false; schedule(); });
+    input.addEventListener('input', schedule);
+  }
   /* ========== 页面级事件绑定（在 render 后） ========== */
   const origRender = render;
   render = function () {
+    clearTimeout(viewTimer);
     origRender();
+    if (loadError) return;
     const view = $('#view');
-    const { page } = route();
+    const { page, id } = route();
     const demoBtn = $('#loadDemo', view); if (demoBtn) demoBtn.onclick = loadDemo;
     if (page === 'records') {
       const filt = $('#filters', view);
-      let timer, composing = false;
-      const scheduleFilterRender = (target, delay) => {
-        clearTimeout(timer);
-        timer = setTimeout(() => {
-          if (composing) return;
-          const active = target.name;
-          render();
-          const el = $(`#filters [name=${active}]`);
-          if (el && el.tagName === 'INPUT') { el.focus(); el.setSelectionRange && el.type === 'text' && el.setSelectionRange(el.value.length, el.value.length); }
-        }, delay);
-      };
-      filt.addEventListener('compositionstart', () => { composing = true; clearTimeout(timer); });
-      filt.addEventListener('compositionend', e => {
-        composing = false;
-        if (!e.target.name) return;
-        recFilter[e.target.name] = e.target.value;
-        scheduleFilterRender(e.target, 300);
-      });
-      filt.addEventListener('input', e => {
-        const { name, value } = e.target;
-        if (!name) return;
-        if (composing || e.isComposing || e.inputType === 'insertCompositionText') return;
-        recFilter[name] = value;
-        scheduleFilterRender(e.target, e.target.tagName === 'SELECT' ? 0 : 300);
-      });
-      $('#resetFilter', view).onclick = () => { Object.assign(recFilter, { q: '', dir: '', eventId: '', unit: '', from: '', to: '', min: '', max: '' }); render(); };
+      $$('input', filt).forEach(input => bindSearch(input, value => { recFilter[input.name] = value; recordPage = 1; }));
+      $$('select', filt).forEach(input => input.onchange = () => { recFilter[input.name] = input.value; recordPage = 1; render(); });
+      $('#resetFilter', view).onclick = () => { setRecordPreset('all'); render(); };
       $('#exportFiltered', view).onclick = () => exportRecordsCsv(filteredRecords(), '份子钱流水');
       $$('th.sortable', view).forEach(th => th.onclick = () => { const k = th.dataset.sort; if (recFilter.sortKey === k) recFilter.sortDir = recFilter.sortDir === 'asc' ? 'desc' : 'asc'; else { recFilter.sortKey = k; recFilter.sortDir = k === 'amount' || k === 'date' ? 'desc' : 'asc'; } render(); });
     }
-    if (page === 'contacts') {
-      const cq = $('#cq', view); if (cq) {
-        let t, composing = false;
-        const scheduleContactRender = (target, delay) => {
-          clearTimeout(t);
-          t = setTimeout(() => {
-            if (composing) return;
-            render();
-            const el = $('#cq');
-            if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
-          }, delay);
-        };
-        cq.addEventListener('compositionstart', () => { composing = true; clearTimeout(t); });
-        cq.addEventListener('compositionend', () => {
-          composing = false;
-          contactView.q = cq.value;
-          scheduleContactRender(cq, 250);
-        });
-        cq.oninput = e => {
-          if (composing || e.isComposing || e.inputType === 'insertCompositionText') return;
-          contactView.q = cq.value;
-          scheduleContactRender(cq, 250);
-        };
-      }
-      const cm = $('#cmode', view); if (cm) cm.onchange = () => { contactView.mode = cm.value; render(); };
+    if (page === 'contacts' && !id) {
+      bindSearch($('#cq', view), value => { contactView.q = value; });
+      $('#cmode', view).onchange = e => { contactView.mode = e.target.value; render(); };
+    }
+    if (page === 'events' && !id) {
+      bindSearch($('#eq', view), value => { eventView.q = value; });
+      $('#eventScope', view).onchange = e => { eventView.scope = e.target.value; render(); };
+      $('#eventMine', view).onchange = e => { eventView.mine = e.target.value; render(); };
     }
     if (page === 'stats') { const sy = $('#statsPeriod', view); if (sy) sy.onchange = () => { statsYear = sy.value.startsWith('year:') ? sy.value.slice(5) : ''; statsMode = sy.value.startsWith('year:') ? 'all' : sy.value; render(); }; }
     if (page === 'settings') {
+      const restore = $('#restoreRecovery', view); if (restore) restore.onclick = restoreRecovery;
       const ib = $('#installBtn', view); if (ib) ib.onclick = async () => { if (!installPrompt) return; installPrompt.prompt(); await installPrompt.userChoice; installPrompt = null; render(); };
       $('#exportJson', view).onclick = exportJson;
       $('#importJson', view).onchange = e => { if (e.target.files[0]) importJson(e.target.files[0]); e.target.value = ''; };
@@ -1127,6 +1178,8 @@
   window.removeEventListener('hashchange', origRender);
   window.addEventListener('hashchange', render);
 
+  $('#quickAdd').disabled = Boolean(loadError);
+  $('#voiceAdd').disabled = Boolean(loadError);
   $('#quickAdd').onclick = () => {
     if (!state.events.length) { toast('请先新增一个事由'); eventForm({}, created => recordForm({}, { eventId: created.id })); }
     else recordForm();
